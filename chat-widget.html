@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyberbot AI Assistant</title>
+    <style>
+        :root {
+            --primary-color: #0084ff;
+            --bg-color: #f8f9fa;
+            --text-color: #1c1e21;
+            --bot-bubble: #ffffff;
+            --user-bubble: #0084ff;
+            --user-text: #ffffff;
+            --shadow: 0 8px 32px rgba(0,0,0,0.12);
+        }
+
+        #ch-widget-container {
+            position: fixed;
+            bottom: 25px;
+            right: 25px;
+            z-index: 999999;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        /* Floating Launcher Button */
+        #ch-widget-launcher {
+            width: 65px;
+            height: 65px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 6px 16px rgba(0,132,255,0.3);
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        #ch-widget-launcher:hover {
+            transform: scale(1.1) rotate(5deg);
+        }
+
+        #ch-widget-launcher svg {
+            width: 38px;
+            height: 38px;
+            animation: ch-float 3s infinite ease-in-out;
+        }
+
+        @keyframes ch-float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-4px); }
+        }
+
+        .ch-launcher-label {
+            position: absolute;
+            right: 80px;
+            bottom: 12px;
+            background: white;
+            padding: 10px 20px;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 132, 255, 0.2);
+            font-size: 15px;
+            font-weight: 600;
+            color: #1c1e21;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s cubic-bezier(0.19, 1, 0.22, 1);
+            pointer-events: none;
+            opacity: 1;
+            border: 1px solid rgba(0, 132, 255, 0.05);
+        }
+
+        .ch-launcher-label::after {
+            content: '';
+            position: absolute;
+            right: -8px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-top: 8px solid transparent;
+            border-bottom: 8px solid transparent;
+            border-left: 8px solid white;
+        }
+
+        /* Ripple effect rings */
+        .ch-pulse-ring {
+            position: absolute;
+            width: 65px;
+            height: 65px;
+            background: rgba(0, 132, 255, 0.3);
+            border-radius: 50%;
+            animation: ch-ripple 2.5s infinite cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .ch-pulse-ring:nth-child(2) {
+            animation-delay: 0.8s;
+        }
+
+        @keyframes ch-ripple {
+            0% { transform: scale(1); opacity: 0.8; }
+            100% { transform: scale(1.8); opacity: 0; }
+        }
+
+        /* Chat Window */
+        #ch-widget-window {
+            width: 400px;
+            height: 600px;
+            background: white;
+            position: absolute;
+            bottom: 85px;
+            right: 0;
+            border-radius: 20px;
+            box-shadow: var(--shadow);
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+            border: 1px solid rgba(0,0,0,0.05);
+            animation: slideUp 0.4s ease;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        #ch-widget-header {
+            background: var(--primary-color);
+            color: white;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        #ch-widget-header div {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #ch-widget-header h3 {
+            margin: 0;
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        /* Messages Area */
+        #ch-widget-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            scrollbar-width: thin;
+        }
+
+        .ch-message {
+            max-width: 85%;
+            padding: 10px 16px;
+            border-radius: 18px;
+            font-size: 14.5px;
+            line-height: 1.5;
+            position: relative;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .ch-message.bot {
+            align-self: flex-start;
+            background: var(--bot-bubble);
+            color: var(--text-color);
+            border-bottom-left-radius: 4px;
+        }
+
+        .ch-message.user {
+            align-self: flex-end;
+            background: var(--user-bubble);
+            color: var(--user-text);
+            border-bottom-right-radius: 4px;
+        }
+
+        .ch-message img {
+            max-width: 100%;
+            border-radius: 10px;
+            margin-top: 8px;
+            display: block;
+        }
+
+        /* Input Area */
+        #ch-widget-input-area {
+            background: white;
+            display: flex;
+            flex-direction: column;
+            border-top: 1px solid rgba(0,0,0,0.05);
+        }
+
+        #ch-widget-preview-bar {
+            padding: 10px 15px;
+            display: none;
+            gap: 10px;
+            align-items: center;
+            background: #f8f9fa;
+        }
+
+        .preview-box {
+            position: relative;
+            width: 50px;
+            height: 50px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #ddd;
+        }
+
+        .preview-box img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .preview-remove {
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+
+        #ch-widget-input-row {
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        #ch-widget-input {
+            flex: 1;
+            border: 1px solid #e4e6eb;
+            border-radius: 25px;
+            padding: 12px 18px;
+            outline: none;
+            font-size: 14px;
+            background: #f0f2f5;
+            transition: all 0.2s;
+        }
+
+        #ch-widget-input:focus {
+            background: white;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 2px rgba(0,132,255,0.1);
+        }
+
+        #ch-widget-attach {
+            background: none;
+            border: none;
+            padding: 8px;
+            cursor: pointer;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+
+        #ch-widget-attach:hover {
+            background: #f0f2f5;
+        }
+
+        #ch-widget-attach svg {
+            width: 22px;
+            height: 22px;
+            fill: #65676b;
+        }
+
+        #ch-widget-send {
+            background: var(--primary-color);
+            border: none;
+            border-radius: 50%;
+            width: 45px;
+            height: 45px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            flex-shrink: 0;
+            padding: 0; /* Important for centering the new image */
+        }
+
+        #ch-widget-send:hover {
+            transform: scale(1.1);
+            filter: brightness(1.1);
+        }
+
+        /* UPDATED CSS FOR SEND ICON */
+        #ch-widget-send img {
+            width: 24px !important;
+            height: 24px !important;
+            min-width: 24px !important;
+            min-height: 24px !important;
+            display: block !important;
+            transform: translateX(2px) !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+        }
+
+        .typing-indicator {
+            display: none;
+            padding: 12px 18px;
+            background: var(--bot-bubble);
+            border-radius: 18px;
+            border-bottom-left-radius: 4px;
+            align-self: flex-start;
+            margin-bottom: 10px;
+            width: fit-content;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            align-items: center;
+            gap: 4px;
+        }
+
+        .typing-indicator span {
+            height: 8px;
+            width: 8px;
+            background-color: #90949c;
+            border-radius: 50%;
+            display: inline-block;
+            animation: typing-bounce 1.3s infinite ease-in-out;
+        }
+
+        .typing-indicator span:nth-child(1) { animation-delay: 0s; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes typing-bounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-6px); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="ch-widget-container">
+    <div id="ch-widget-window">
+        <div id="ch-widget-header">
+            <div>
+                <svg width="28" height="28" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M0 0 C2.655 2.313 5.271 4.659 7.859 7.047 C9.593 8.629 11.347 10.109 13.188 11.562 C16.867 14.751 19.896 18.256 23 22 C23.436 22.519 23.872 23.037 24.322 23.571 C30.139 30.511 35.578 37.561 40.375 45.25 C40.793 45.915 41.212 46.58 41.643 47.266 C43.495 50.279 45.059 53.142 46.426 56.418 C47.701 59.47 48.662 61.653 51 64 C54.737 64.833 58.159 64.875 61.984 64.863 C74.047 64.948 84.477 71.968 93.023 79.871 C105.742 93.229 107.482 110.816 107.398 128.406 C107.4 129.945 107.403 131.483 107.407 133.021 C107.412 136.221 107.405 139.421 107.391 142.622 C107.374 146.683 107.384 150.743 107.402 154.804 C107.413 157.973 107.409 161.143 107.401 164.312 C107.399 165.808 107.402 167.303 107.409 168.799 C107.474 186.375 104.76 202.847 92.18 215.973 C82.046 225.398 69.04 231.32 55 231 C53.326 230.707 51.656 230.384 50 230 C49.648 231.201 49.648 231.201 49.289 232.426 C39.894 258.475 20.732 281.106 -4.008 293.508 C-20.549 300.874 -37.008 300.46 -54.773 300.434 C-56.787 300.436 -58.8 300.44 -60.814 300.445 C-67.123 300.459 -73.432 300.457 -79.741 300.446 C-86.227 300.435 -92.713 300.449 -99.199 300.475 C-104.797 300.498 -110.396 300.504 -115.995 300.498 C-119.326 300.495 -122.657 300.499 -125.988 300.515 C-129.697 300.53 -133.406 300.519 -137.115 300.502 C-138.205 300.511 -139.295 300.521 -140.418 300.531 C-147.057 300.467 -151.341 299.543 -157 296 C-160.778 291.464 -160.561 287.048 -160.406 281.359 C-159.542 274.212 -156.658 268.947 -151 264.5 C-144.819 260.213 -139.514 259.682 -132.168 259.664 C-131.217 259.657 -130.267 259.651 -129.287 259.644 C-127.279 259.634 -125.271 259.629 -123.263 259.629 C-120.208 259.625 -117.155 259.589 -114.1 259.551 C-112.143 259.545 -110.187 259.541 -108.23 259.539 C-107.325 259.525 -106.42 259.51 -105.487 259.496 C-99.515 259.538 -94.917 260.479 -90 264 C-89.058 265.051 -88.137 266.12 -87.237 267.207 C-84.545 270.077 -82.524 270.476 -78.628 270.729 C-76.488 270.748 -74.347 270.734 -72.207 270.691 C-71.065 270.69 -69.923 270.689 -68.747 270.687 C-66.334 270.678 -63.921 270.655 -61.508 270.617 C-57.842 270.563 -54.179 270.556 -50.514 270.557 C-48.161 270.542 -45.809 270.524 -43.457 270.504 C-41.831 270.499 -41.831 270.499 -40.173 270.494 C-23.264 270.183 -9.967 263.65 2.09 251.977 C27.674 224.72 40.679 181.908 40.148 145.238 C38.222 103.21 22.809 67.317 -5 36 C-5.58 35.346 -6.16 34.693 -6.758 34.02 C-16.222 24.008 -28.203 16.005 -40 9 C-40.875 8.48 -40.875 8.48 -41.768 7.95 C-77.726 -13.059 -121.872 -17.437 -161.869 -7.05 C-202.581 4.093 -237.416 30.997 -258.812 67.312 C-280.051 104.572 -285.244 148.505 -274.473 189.867 C-271.784 199.565 -268.184 208.87 -263.551 217.805 C-263.138 218.601 -262.725 219.397 -262.3 220.218 C-261.501 221.731 -260.684 223.235 -259.845 224.725 C-257.108 229.825 -256.144 234.215 -257 240 C-259.11 244.473 -261.735 247.085 -266.07 249.309 C-270.383 250.854 -274.321 250.64 -278.625 249 C-283.386 244.991 -286.547 240.468 -288.438 234.562 C-289.261 232.466 -289.261 232.466 -291 231 C-294.034 230.441 -296.935 230.268 -300.016 230.216 C-312.11 230.002 -322.603 224.822 -331.477 216.746 C-342.236 205.536 -347.098 192.054 -347.145 176.663 C-347.149 175.966 -347.152 175.269 -347.155 174.551 C-347.165 172.267 -347.167 169.983 -347.168 167.699 C-347.171 166.097 -347.175 164.494 -347.178 162.891 C-347.184 159.538 -347.186 156.185 -347.185 152.832 C-347.185 148.559 -347.199 144.286 -347.216 140.013 C-347.227 136.704 -347.229 133.395 -347.229 130.085 C-347.23 128.511 -347.234 126.937 -347.242 125.363 C-347.321 107.649 -344.775 92.282 -332 79 C-324.583 72.145 -315.874 67.249 -306 65 C-303.561 65.148 -301.124 65.315 -298.688 65.5 C-293.59 65.273 -293.59 65.273 -289.532 62.469 C-286.585 58.096 -284.488 53.268 -282.26 48.503 C-280.222 44.455 -277.699 40.803 -275.062 37.125 C-274.561 36.423 -274.06 35.722 -273.544 34.999 C-269.515 29.481 -265.106 24.452 -260.395 19.512 C-258.437 17.459 -256.608 15.38 -254.812 13.188 C-243.552 -0.123 -227.193 -10.708 -212 -19 C-211.373 -19.344 -210.746 -19.687 -210.1 -20.042 C-143.601 -55.999 -58.364 -48.283 0 0 Z " fill="white" transform="translate(420,171)"/>
+                    <path d="M0 0 C1.067 0.252 2.135 0.505 3.234 0.765 C4.184 0.992 5.134 1.219 6.112 1.453 C23.723 5.335 40.778 2.897 58.087 -1.254 C61.599 -2.095 65.12 -2.883 68.646 -3.664 C70.137 -3.995 71.627 -4.331 73.116 -4.673 C85.818 -7.57 98.349 -8.863 110.035 -2.243 C132.685 12.323 147.077 43.346 152.747 68.764 C158.335 96.237 157.984 129.302 143.656 154.253 C140.567 158.912 137.564 161.406 132.16 162.757 C124.087 163.534 116.565 162.779 108.598 161.507 C107.498 161.336 106.399 161.165 105.266 160.988 C93.721 159.135 82.256 156.866 70.8 154.532 C56.11 151.563 41.698 149.673 26.66 149.695 C25.976 149.696 25.292 149.697 24.587 149.697 C2.398 149.79 -19.114 154.05 -40.751 158.607 C-75.453 165.876 -75.453 165.876 -85.09 160.07 C-98.655 148.861 -101.891 128.166 -103.574 111.571 C-106.903 74.484 -95.229 38.753 -71.641 10.101 C-70.799 9.101 -69.957 8.1 -69.09 7.07 C-68.183 5.972 -68.183 5.972 -67.258 4.851 C-49.561 -14.783 -21.878 -5.177 0 0 Z M-59.09 63.07 C-63.371 69.156 -64.818 74.664 -64.09 82.07 C-62.553 88.908 -58.962 94.511 -53.086 98.394 C-46.65 101.675 -39.846 102.402 -32.859 100.445 C-26.675 97.765 -21.868 92.698 -18.918 86.679 C-16.997 80.627 -17.033 73.529 -19.652 67.695 C-23.394 61.358 -29.105 57.237 -36.09 55.07 C-45.222 53.881 -52.582 56.562 -59.09 63.07 Z M73.066 65.226 C69.293 71.242 69.207 77.151 69.91 84.07 C71.684 90.715 76.357 95.244 81.91 99.07 C87.952 101.974 94.237 102.201 100.637 100.23 C107.965 96.942 112.03 92.258 115.285 85.007 C116.975 77.066 115.426 70.169 111.223 63.32 C105.906 58.147 100.237 55.052 92.785 54.695 C84.616 54.816 78.103 59.019 73.066 65.226 Z " fill="white" transform="translate(274.08984375,224.93017578125)"/>
+                </svg>
+                <h3>Cyberbot Assistant</h3>
+            </div>
+            <span style="cursor: pointer; opacity: 0.8; font-size: 20px;" onclick="toggleWidget()">✕</span>
+        </div>
+        
+        <div id="ch-widget-messages">
+            <div class="ch-message bot">Hello! I'm your Cyberbot AI assistant. How can I help you today? 😊</div>
+            <div id="typing" class="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+            </div>
+        </div>
+
+        <div id="ch-widget-input-area">
+            <!-- Image Preview Bar -->
+            <div id="ch-widget-preview-bar">
+                <div class="preview-box">
+                    <img id="ch-widget-preview-img" src="" alt="">
+                    <div class="preview-remove" onclick="clearPreview()">✕</div>
+                </div>
+                <span style="font-size: 12px; color: #65676b;">Image attached</span>
+            </div>
+
+            <div id="ch-widget-input-row">
+                <!-- Hidden File Input -->
+                <input type="file" id="ch-widget-file-input" style="display: none;" accept="image/*" onchange="handleFile(event)">
+                
+                <!-- Attach Button -->
+                <button id="ch-widget-attach" onclick="document.getElementById('ch-widget-file-input').click()" title="Attach Image">
+                    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.31 2.69 6 6 6s6-2.69 6-6V6h-1.5z"/>
+                    </svg>
+                </button>
+
+                <input type="text" id="ch-widget-input" placeholder="Ask me anything..." onkeypress="handleKey(event)">
+                
+                <button id="ch-widget-send" onclick="sendMessage()" title="Send">
+                    <img src="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMjQgMjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTIuMDEgMjFMMjMgMTIgMi4wMSAzIDIgMTBsMTUgMi0xNSAyeiIgZmlsbD0id2hpdGUiLz48L3N2Zz4=" alt="Send">
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Launcher Button -->
+    <div id="ch-launcher-container" style="position: relative; display: flex; align-items: center; cursor: pointer;">
+        <div class="ch-pulse-ring"></div>
+        <div class="ch-pulse-ring"></div>
+        <div id="ch-widget-label" class="ch-launcher-label">Cyber Bot</div>
+        <div id="ch-widget-launcher" onclick="toggleWidget()">
+            <!-- New SVG icon (white fill on blue background) -->
+            <svg width="38" height="38" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0 0 C2.655 2.313 5.271 4.659 7.859 7.047 C9.593 8.629 11.347 10.109 13.188 11.562 C16.867 14.751 19.896 18.256 23 22 C23.436 22.519 23.872 23.037 24.322 23.571 C30.139 30.511 35.578 37.561 40.375 45.25 C40.793 45.915 41.212 46.58 41.643 47.266 C43.495 50.279 45.059 53.142 46.426 56.418 C47.701 59.47 48.662 61.653 51 64 C54.737 64.833 58.159 64.875 61.984 64.863 C74.047 64.948 84.477 71.968 93.023 79.871 C105.742 93.229 107.482 110.816 107.398 128.406 C107.4 129.945 107.403 131.483 107.407 133.021 C107.412 136.221 107.405 139.421 107.391 142.622 C107.374 146.683 107.384 150.743 107.402 154.804 C107.413 157.973 107.409 161.143 107.401 164.312 C107.399 165.808 107.402 167.303 107.409 168.799 C107.474 186.375 104.76 202.847 92.18 215.973 C82.046 225.398 69.04 231.32 55 231 C53.326 230.707 51.656 230.384 50 230 C49.648 231.201 49.648 231.201 49.289 232.426 C39.894 258.475 20.732 281.106 -4.008 293.508 C-20.549 300.874 -37.008 300.46 -54.773 300.434 C-56.787 300.436 -58.8 300.44 -60.814 300.445 C-67.123 300.459 -73.432 300.457 -79.741 300.446 C-86.227 300.435 -92.713 300.449 -99.199 300.475 C-104.797 300.498 -110.396 300.504 -115.995 300.498 C-119.326 300.495 -122.657 300.499 -125.988 300.515 C-129.697 300.53 -133.406 300.519 -137.115 300.502 C-138.205 300.511 -139.295 300.521 -140.418 300.531 C-147.057 300.467 -151.341 299.543 -157 296 C-160.778 291.464 -160.561 287.048 -160.406 281.359 C-159.542 274.212 -156.658 268.947 -151 264.5 C-144.819 260.213 -139.514 259.682 -132.168 259.664 C-131.217 259.657 -130.267 259.651 -129.287 259.644 C-127.279 259.634 -125.271 259.629 -123.263 259.629 C-120.208 259.625 -117.155 259.589 -114.1 259.551 C-112.143 259.545 -110.187 259.541 -108.23 259.539 C-107.325 259.525 -106.42 259.51 -105.487 259.496 C-99.515 259.538 -94.917 260.479 -90 264 C-89.058 265.051 -88.137 266.12 -87.237 267.207 C-84.545 270.077 -82.524 270.476 -78.628 270.729 C-76.488 270.748 -74.347 270.734 -72.207 270.691 C-71.065 270.69 -69.923 270.689 -68.747 270.687 C-66.334 270.678 -63.921 270.655 -61.508 270.617 C-57.842 270.563 -54.179 270.556 -50.514 270.557 C-48.161 270.542 -45.809 270.524 -43.457 270.504 C-41.831 270.499 -41.831 270.499 -40.173 270.494 C-23.264 270.183 -9.967 263.65 2.09 251.977 C27.674 224.72 40.679 181.908 40.148 145.238 C38.222 103.21 22.809 67.317 -5 36 C-5.58 35.346 -6.16 34.693 -6.758 34.02 C-16.222 24.008 -28.203 16.005 -40 9 C-40.875 8.48 -40.875 8.48 -41.768 7.95 C-77.726 -13.059 -121.872 -17.437 -161.869 -7.05 C-202.581 4.093 -237.416 30.997 -258.812 67.312 C-280.051 104.572 -285.244 148.505 -274.473 189.867 C-271.784 199.565 -268.184 208.87 -263.551 217.805 C-263.138 218.601 -262.725 219.397 -262.3 220.218 C-261.501 221.731 -260.684 223.235 -259.845 224.725 C-257.108 229.825 -256.144 234.215 -257 240 C-259.11 244.473 -261.735 247.085 -266.07 249.309 C-270.383 250.854 -274.321 250.64 -278.625 249 C-283.386 244.991 -286.547 240.468 -288.438 234.562 C-289.261 232.466 -289.261 232.466 -291 231 C-294.034 230.441 -296.935 230.268 -300.016 230.216 C-312.11 230.002 -322.603 224.822 -331.477 216.746 C-342.236 205.536 -347.098 192.054 -347.145 176.663 C-347.149 175.966 -347.152 175.269 -347.155 174.551 C-347.165 172.267 -347.167 169.983 -347.168 167.699 C-347.171 166.097 -347.175 164.494 -347.178 162.891 C-347.184 159.538 -347.186 156.185 -347.185 152.832 C-347.185 148.559 -347.199 144.286 -347.216 140.013 C-347.227 136.704 -347.229 133.395 -347.229 130.085 C-347.23 128.511 -347.234 126.937 -347.242 125.363 C-347.321 107.649 -344.775 92.282 -332 79 C-324.583 72.145 -315.874 67.249 -306 65 C-303.561 65.148 -301.124 65.315 -298.688 65.5 C-293.59 65.273 -293.59 65.273 -289.532 62.469 C-286.585 58.096 -284.488 53.268 -282.26 48.503 C-280.222 44.455 -277.699 40.803 -275.062 37.125 C-274.561 36.423 -274.06 35.722 -273.544 34.999 C-269.515 29.481 -265.106 24.452 -260.395 19.512 C-258.437 17.459 -256.608 15.38 -254.812 13.188 C-243.552 -0.123 -227.193 -10.708 -212 -19 C-211.373 -19.344 -210.746 -19.687 -210.1 -20.042 C-143.601 -55.999 -58.364 -48.283 0 0 Z " fill="white" transform="translate(420,171)"/>
+                <path d="M0 0 C1.067 0.252 2.135 0.505 3.234 0.765 C4.184 0.992 5.134 1.219 6.112 1.453 C23.723 5.335 40.778 2.897 58.087 -1.254 C61.599 -2.095 65.12 -2.883 68.646 -3.664 C70.137 -3.995 71.627 -4.331 73.116 -4.673 C85.818 -7.57 98.349 -8.863 110.035 -2.243 C132.685 12.323 147.077 43.346 152.747 68.764 C158.335 96.237 157.984 129.302 143.656 154.253 C140.567 158.912 137.564 161.406 132.16 162.757 C124.087 163.534 116.565 162.779 108.598 161.507 C107.498 161.336 106.399 161.165 105.266 160.988 C93.721 159.135 82.256 156.866 70.8 154.532 C56.11 151.563 41.698 149.673 26.66 149.695 C25.976 149.696 25.292 149.697 24.587 149.697 C2.398 149.79 -19.114 154.05 -40.751 158.607 C-75.453 165.876 -75.453 165.876 -85.09 160.07 C-98.655 148.861 -101.891 128.166 -103.574 111.571 C-106.903 74.484 -95.229 38.753 -71.641 10.101 C-70.799 9.101 -69.957 8.1 -69.09 7.07 C-68.183 5.972 -68.183 5.972 -67.258 4.851 C-49.561 -14.783 -21.878 -5.177 0 0 Z M-59.09 63.07 C-63.371 69.156 -64.818 74.664 -64.09 82.07 C-62.553 88.908 -58.962 94.511 -53.086 98.394 C-46.65 101.675 -39.846 102.402 -32.859 100.445 C-26.675 97.765 -21.868 92.698 -18.918 86.679 C-16.997 80.627 -17.033 73.529 -19.652 67.695 C-23.394 61.358 -29.105 57.237 -36.09 55.07 C-45.222 53.881 -52.582 56.562 -59.09 63.07 Z M73.066 65.226 C69.293 71.242 69.207 77.151 69.91 84.07 C71.684 90.715 76.357 95.244 81.91 99.07 C87.952 101.974 94.237 102.201 100.637 100.23 C107.965 96.942 112.03 92.258 115.285 85.007 C116.975 77.066 115.426 70.169 111.223 63.32 C105.906 58.147 100.237 55.052 92.785 54.695 C84.616 54.816 78.103 59.019 73.066 65.226 Z " fill="white" transform="translate(274.08984375,224.93017578125)"/>
+            </svg>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_URL = "http://localhost:3000/api/chat"; // Change to your ngrok URL for production
+    let userId = localStorage.getItem("ch_chat_user_id") || null;
+    let selectedImage = null;
+
+    function toggleWidget() {
+        const window = document.getElementById("ch-widget-window");
+        const label = document.getElementById("ch-widget-label");
+        const isVisible = window.style.display === "flex";
+        
+        window.style.display = isVisible ? "none" : "flex";
+        label.style.opacity = isVisible ? "1" : "0";
+        label.style.transform = isVisible ? "scale(1)" : "scale(0.8)";
+        
+        if (!isVisible) document.getElementById("ch-widget-input").focus();
+    }
+
+    function handleKey(e) {
+        if (e.key === "Enter") sendMessage();
+    }
+
+    function handleFile(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            selectedImage = {
+                data: event.target.result.split(',')[1],
+                mimeType: file.type,
+                preview: event.target.result
+            };
+            document.getElementById("ch-widget-preview-img").src = selectedImage.preview;
+            document.getElementById("ch-widget-preview-bar").style.display = "flex";
+        };
+        reader.readAsDataURL(file);
+    }
+
+    function clearPreview() {
+        selectedImage = null;
+        document.getElementById("ch-widget-file-input").value = "";
+        document.getElementById("ch-widget-preview-bar").style.display = "none";
+    }
+
+    async function sendMessage() {
+        const input = document.getElementById("ch-widget-input");
+        const msg = input.value.trim();
+        if (!msg && !selectedImage) return;
+
+        // Add user message to UI
+        addMessage(msg, "user", selectedImage ? selectedImage.preview : null);
+        
+        const payload = {
+            message: msg,
+            userId: userId,
+            mediaData: selectedImage ? { data: selectedImage.data, mimeType: selectedImage.mimeType } : null
+        };
+
+        input.value = "";
+        clearPreview();
+
+        const typing = document.getElementById("typing");
+        typing.style.display = "flex";
+        scrollDown();
+
+        try {
+            const response = await fetch(API_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            
+            if (data.userId) {
+                userId = data.userId;
+                localStorage.setItem("ch_chat_user_id", userId);
+            }
+
+            typing.style.display = "none";
+            addMessage(data.reply, "bot");
+        } catch (err) {
+            typing.style.display = "none";
+            addMessage("Service is currently offline. Please try again later.", "bot");
+        }
+    }
+
+    function addMessage(text, side, imgSrc = null) {
+        const container = document.getElementById("ch-widget-messages");
+        const typing = document.getElementById("typing");
+        const div = document.createElement("div");
+        div.className = `ch-message ${side}`;
+        
+        if (text) {
+            const textNodes = document.createTextNode(text);
+            div.appendChild(textNodes);
+        }
+
+        if (imgSrc) {
+            const img = document.createElement("img");
+            img.src = imgSrc;
+            div.appendChild(img);
+        }
+
+        container.insertBefore(div, typing);
+        scrollDown();
+    }
+
+    function scrollDown() {
+        const container = document.getElementById("ch-widget-messages");
+        container.scrollTop = container.scrollHeight;
+    }
+</script>
+
+</body>
+</html>
