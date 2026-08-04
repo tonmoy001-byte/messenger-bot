@@ -22,12 +22,6 @@ const GROQ_MODEL = process.env.GROQ_MODEL || "qwen/qwen-2.5-72b";
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_MODEL = "gemini-2.5-flash";
 
-function isBangla(text) {
-  if (!text) return false;
-  const banglaRange = /[\u0980-\u09FF]/;
-  return banglaRange.test(text);
-}
-
 /**
  * Fetch business_info entries from knowledge_base (type='business_info', isActive=true).
  * These are always included in the AI system prompt.
@@ -121,7 +115,7 @@ ${productsContext}
 RULES YOU MUST FOLLOW:
 1. Stay ULTRA-CONCISE. Use the minimum tokens possible.
 2. MANDATORY: Before providing detailed info (specs, course lists, or long answers), ALWAYS confirm if the user wants it.
-3. Always respond in the SAME LANGUAGE the customer used (Bangla, English, or Banglish).
+3. LANGUAGE RULE: You MUST respond in the exact same language the customer used. If the customer writes in Bangla (বাংলা), you MUST reply in Bangla script. If the customer writes in English, reply in English. If the customer writes in Banglish (English + Bengali mixed), reply in Banglish. Never switch languages unexpectedly.
 4. Be helpful but brief. Aim for 1-2 short sentences max per response.
 5. If you don't know something specific, say:
    "Let me check! Contact us at the business contact number."
@@ -297,39 +291,31 @@ async function callGemini(messages, mediaData = null) {
 }
 
 // ─── AI Provider Router ───────────────────────────────────
-// Routes Bangla messages to Gemini (strong multilingual support).
-// Tries primary provider first for English, falls back on failure.
+// Tries primary provider first, falls back to secondary on failure.
 async function callAI(messages, mediaData = null) {
   const primary = AI_PROVIDER === "gemini" ? "gemini" : "groq";
   const secondary = primary === "gemini" ? "groq" : "gemini";
 
-  const lastUserMsg = messages.findLast(m => m.role === "user");
-  const userText = lastUserMsg?.content || "";
-  const containsBangla = isBangla(userText);
-
-  const preferredProvider = containsBangla ? "gemini" : primary;
-  const fallbackProvider = preferredProvider === "gemini" ? "groq" : "gemini";
-
   try {
-    const reply = preferredProvider === "groq"
+    const reply = primary === "groq"
       ? await callGroq(messages, mediaData)
       : await callGemini(messages, mediaData);
-    return { reply, provider: preferredProvider };
+    return { reply, provider: primary };
   } catch (err) {
-    console.error(`[AI] ${preferredProvider} failed: ${err.message}`);
+    console.error(`[AI] ${primary} failed: ${err.message}`);
 
     const status = err.response?.status || 0;
     const isRetryable = err.code === "ETIMEDOUT" || status === 429 || status === 503 || status === 500;
 
     if (isRetryable) {
-      console.log(`[AI] Falling back to ${fallbackProvider}...`);
+      console.log(`[AI] Falling back to ${secondary}...`);
       try {
-        const reply = fallbackProvider === "groq"
+        const reply = secondary === "groq"
           ? await callGroq(messages, mediaData)
           : await callGemini(messages, mediaData);
-        return { reply, provider: fallbackProvider };
+        return { reply, provider: secondary };
       } catch (fallbackErr) {
-        console.error(`[AI] ${fallbackProvider} fallback also failed: ${fallbackErr.message}`);
+        console.error(`[AI] ${secondary} fallback also failed: ${fallbackErr.message}`);
         throw fallbackErr;
       }
     }
@@ -374,6 +360,13 @@ ${adContext.creative?.call_to_action ? `Call to Action: "${adContext.creative.ca
       const ragContext = await retrieveContext(userMessage);
       if (ragContext) {
         systemPrompt = buildRAGPrompt(systemPrompt, ragContext);
+      }
+
+      const isBangla = /[\u0980-\u09FF]/.test(userMessage);
+      if (isBangla) {
+        systemPrompt += `
+
+LANGUAGE INSTRUCTION: The user is writing in Bangla (বাংলা). You MUST reply entirely in Bangla script. Do not switch to English unless the user explicitly asks in English. Use Bengali script for all responses.`;
       }
     }
 
