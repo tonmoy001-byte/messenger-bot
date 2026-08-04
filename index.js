@@ -422,7 +422,7 @@ app.get("/api/admin/settings", adminLimiter, authenticateAdmin, async (req, res)
 
 app.post("/api/admin/settings", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
-    const update = req.body;
+    const update = req.body.updates || req.body;
     const settings = await Settings.findOneAndUpdate({ configId: "global" }, { $set: update }, { new: true, upsert: true });
     res.json(settings);
   } catch (err) { res.status(500).json({ error: err.message }); }

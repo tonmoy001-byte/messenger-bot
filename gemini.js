@@ -86,7 +86,7 @@ function buildSystemPrompt(settings, productsContext, businessInfoContext = "") 
 You are a ${tone} customer support agent for "${settings.businessName || "the business"}".
 Current Timezone context: ${settings.timezone || "UTC"}
 
-${settings.customInstructions ? `CUSTOM BUSINESS INSTRUCTIONS:\n${settings.customInstructions}\n` : ""}
+${settings.systemPrompt || settings.customInstructions ? `CUSTOM BUSINESS INSTRUCTIONS:\n${settings.systemPrompt || settings.customInstructions}\n` : ""}
 ${businessInfoBlock}
 ${knowledgeBlock}
 ${personalityBlock}
