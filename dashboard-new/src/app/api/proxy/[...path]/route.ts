@@ -54,14 +54,26 @@ async function proxyRequest(request: NextRequest, path: string) {
     }
 
     const data = await res.text()
+
+    // Forward Set-Cookie headers from backend
+    const setCookies = res.headers.get("set-cookie")
+
     try {
       const json = JSON.parse(data)
-      return NextResponse.json(json, { status: res.status })
+      const response = NextResponse.json(json, { status: res.status })
+      if (setCookies) {
+        response.headers.set("set-cookie", setCookies)
+      }
+      return response
     } catch {
-      return new NextResponse(data, {
+      const response = new NextResponse(data, {
         status: res.status,
         headers: { "Content-Type": resContentType || "text/plain" },
       })
+      if (setCookies) {
+        response.headers.set("set-cookie", setCookies)
+      }
+      return response
     }
   } catch (error) {
     return NextResponse.json(

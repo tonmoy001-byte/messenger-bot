@@ -26,8 +26,6 @@ function LoginForm() {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Login failed")
 
-      document.cookie = `admin_token=${data.token}; path=/; max-age=${60 * 60 * 24}; samesite=lax`
-
       toast.success("Welcome back!")
       const redirect = searchParams.get("redirect") || "/dashboard"
       router.push(redirect)
