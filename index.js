@@ -48,7 +48,7 @@ const io = socketIo(server, {
   transports: ["websocket", "polling"]
 });
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "cyberbot-secret";
+const JWT_SECRET = process.env.JWT_SECRET || "cyberbot-admin-secret-key-change-in-production";
 
 const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: "Too many requests" }, standardHeaders: true, legacyHeaders: false });
 const chatLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, message: { error: "Rate limit exceeded" } });
