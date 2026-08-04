@@ -3,33 +3,29 @@
  * ─────────────────────────────────────────────────────────────
  * Facebook Messenger Send API helper functions.
  * Handles typing indicators and sending text messages.
+ * Includes retry wrapper for rate-limited API calls.
  * ─────────────────────────────────────────────────────────────
  */
 
 require("dotenv").config();
 const axios = require("axios");
 const { getMessengerToken } = require("./utils/tokenManager");
+const { withRetry } = require("./utils/retry");
 
 const MESSENGER_API = "https://graph.facebook.com/v19.0/me/messages";
 
 /**
  * Send a typing "bubble" to show the bot is "thinking".
- * Makes the bot feel more human to the user.
  * @param {string} recipientId - The Facebook user's PSID
  */
 async function sendTyping(recipientId, pageId = null) {
   try {
     const token = await getMessengerToken(pageId);
-    await axios.post(
+    await withRetry(() => axios.post(
       MESSENGER_API,
-      {
-        recipient: { id: recipientId },
-        sender_action: "typing_on",
-      },
-      {
-        params: { access_token: token },
-      }
-    );
+      { recipient: { id: recipientId }, sender_action: "typing_on" },
+      { params: { access_token: token } }
+    ), "Messenger Typing");
   } catch (error) {
     console.error("⚠️  Typing indicator error:", error.message);
   }
@@ -43,23 +39,18 @@ async function sendTyping(recipientId, pageId = null) {
 async function sendMessage(recipientId, text, pageId = null) {
   try {
     const token = await getMessengerToken(pageId);
-    // Messenger has a 2000 character limit per message
-    // If reply is longer, split it intelligently
     const chunks = splitMessage(text, 1900);
 
     for (const chunk of chunks) {
-      await axios.post(
+      await withRetry(() => axios.post(
         MESSENGER_API,
         {
           recipient: { id: recipientId },
           message: { text: chunk },
           messaging_type: "RESPONSE",
         },
-        {
-          params: { access_token: token },
-        }
-      );
-      // Small delay between chunks
+        { params: { access_token: token } }
+      ), "Messenger Send");
       if (chunks.length > 1) {
         await new Promise((resolve) => setTimeout(resolve, 400));
       }

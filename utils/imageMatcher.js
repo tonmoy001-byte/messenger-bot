@@ -40,9 +40,9 @@ async function matchProducts(detectedItems) {
         const descMatch = descLower.includes(itemLower);
         
         if (keywordMatch || nameMatch || descMatch) {
-          if (!matched.find(m => m._id.toString() === product._id.toString())) {
+          if (!matched.find(m => m.id === product.id)) {
             matched.push({
-              _id: product._id,
+              id: product.id,
               name: product.name,
               price: product.price,
               category: product.category,
@@ -71,7 +71,7 @@ async function matchProducts(detectedItems) {
         if (firstItem.includes(keyword)) {
           const categoryProducts = products.filter(p => p.category === category).slice(0, 3);
           suggestions.push(...categoryProducts.map(p => ({
-            _id: p._id,
+            id: p.id,
             name: p.name,
             price: p.price,
             category: p.category,

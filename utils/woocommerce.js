@@ -115,7 +115,7 @@ async function syncWooProducts(storeUrl, consumerKey, consumerSecret) {
     for (const p of products) {
       const existing = await Product.findOne({ externalId: p.externalId, externalSource: "woocommerce" });
       if (existing) {
-        await Product.findByIdAndUpdate(existing._id, { $set: p });
+        await Product.findByIdAndUpdate(existing.id, { $set: p });
         updated++;
       } else {
         await new Product(p).save();

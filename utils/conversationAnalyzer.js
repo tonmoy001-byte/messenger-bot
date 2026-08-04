@@ -17,7 +17,7 @@ const { Message, Feedback, Order, User } = require("../db");
  */
 async function analyzeConversations(startDate, endDate) {
   try {
-    const filter = { timestamp: { $gte: startDate, $lte: endDate } };
+    const filter = { createdAt: { $gte: startDate, $lte: endDate } };
 
     // Total messages
     const totalMessages = await Message.countDocuments(filter);
@@ -32,7 +32,7 @@ async function analyzeConversations(startDate, endDate) {
     // Average response time (time between user message and AI reply)
     const conversations = await Message.aggregate([
       { $match: filter },
-      { $sort: { uid: 1, timestamp: 1 } }
+      { $sort: { uid: 1, createdAt: 1 } }
     ]);
 
     let totalResponseTime = 0;
@@ -46,9 +46,9 @@ async function analyzeConversations(startDate, endDate) {
         lastUserTime = null;
       }
       if (msg.role === "user") {
-        lastUserTime = msg.timestamp;
+        lastUserTime = new Date(msg.createdAt).getTime();
       } else if (msg.role === "model" && lastUserTime) {
-        const diff = (msg.timestamp - lastUserTime) / 1000;
+        const diff = (new Date(msg.createdAt).getTime() - lastUserTime) / 1000;
         if (diff > 0 && diff < 300) {
           totalResponseTime += diff;
           responseCount++;
@@ -81,9 +81,9 @@ async function analyzeConversations(startDate, endDate) {
     ]);
 
     // Orders generated in period
-    const orders = await Order.countDocuments({ timestamp: { $gte: startDate, $lte: endDate } });
+    const orders = await Order.countDocuments({ createdAt: { $gte: startDate, $lte: endDate } });
     const revenueResult = await Order.aggregate([
-      { $match: { timestamp: { $gte: startDate, $lte: endDate } } },
+      { $match: { createdAt: { $gte: startDate, $lte: endDate } } },
       { $group: { _id: null, total: { $sum: "$totalAmount" } } }
     ]);
 

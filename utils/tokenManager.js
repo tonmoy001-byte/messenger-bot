@@ -3,6 +3,7 @@
  * ─────────────────────────────────────────────────────────────
  * Unified token management for Messenger, WhatsApp, and Instagram.
  * Handles token retrieval from Integration, Settings, or Environment.
+ * Includes token revocation detection for expired/invalid tokens.
  * ─────────────────────────────────────────────────────────────
  */
 
@@ -15,6 +16,11 @@ async function getAccessToken(platform, externalId = null) {
       const typeMap = { messenger: 'facebook', whatsapp: 'whatsapp', instagram: 'instagram' };
       const integration = await Integration.findOne({ externalId, type: typeMap[platform] || platform });
       if (integration && integration.accessToken) {
+        // Skip revoked integrations
+        if (integration.revokedAt) {
+          console.warn(` [TokenManager] Skipping revoked token for ${platform} (${externalId})`);
+          return null;
+        }
         const token = decrypt(integration.accessToken);
         if (token) {
           console.log(` [TokenManager] Using integration token for ${platform}`);
@@ -49,8 +55,58 @@ async function getAccessToken(platform, externalId = null) {
   }
 }
 
+/**
+ * Handle token revocation when an API call returns error code 190.
+ * Marks the integration as inactive and sets revokedAt timestamp.
+ * @param {string} platform - messenger | whatsapp | instagram
+ * @param {string} externalId - Page ID, WABA ID, etc.
+ */
+async function handleTokenRevocation(platform, externalId) {
+  try {
+    const typeMap = { messenger: 'facebook', whatsapp: 'whatsapp', instagram: 'instagram' };
+    const integration = await Integration.findOne({
+      externalId,
+      type: typeMap[platform] || platform,
+    });
+
+    if (integration) {
+      integration.revokedAt = new Date();
+      integration.isActive = false;
+      await integration.save();
+      console.warn(` [TokenManager] REVOKED ${platform} token for ${externalId} — marking inactive`);
+    }
+
+    // Also check Settings
+    const settings = await Settings.findOne({ configId: "global" });
+    if (settings) {
+      const fieldMap = { messenger: 'messengerRevoked', whatsapp: 'whatsappRevoked', instagram: 'instagramRevoked' };
+      const field = fieldMap[platform];
+      if (field) {
+        settings[field] = true;
+        settings[`${field}At`] = new Date();
+        await settings.save();
+        console.warn(` [TokenManager] REVOKED ${platform} token in Settings`);
+      }
+    }
+
+    // Notify via webhook (if configured)
+    const io = global.io;
+    if (io) {
+      io.emit("token_revoked", { platform, externalId, revokedAt: new Date() });
+    }
+  } catch (err) {
+    console.error(` [TokenManager] Revocation error:`, err.message);
+  }
+}
+
 async function getMessengerToken(pageId = null) { return getAccessToken('messenger', pageId); }
 async function getWhatsAppToken(wabaId = null) { return getAccessToken('whatsapp', wabaId); }
 async function getInstagramToken(pageId = null) { return getAccessToken('instagram', pageId); }
 
-module.exports = { getAccessToken, getMessengerToken, getWhatsAppToken, getInstagramToken };
+module.exports = {
+  getAccessToken,
+  getMessengerToken,
+  getWhatsAppToken,
+  getInstagramToken,
+  handleTokenRevocation,
+};

@@ -2,25 +2,37 @@
   "name": "messenger-bot",
   "version": "1.0.0",
   "description": "Multi-Channel AI Chatbot with Order Management",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node start-all.js",
-    "server": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js",
+    "server": "node server.js",
+    "backend": "node index.js",
+    "dev": "node index.js",
+    "ngrok": "ngrok http 3000",
+    "dev:all": "concurrently -n server,ngrok -c blue,green \"node index.js\" \"ngrok http 3000\""
   },
   "dependencies": {
     "@pinecone-database/pinecone": "^7.2.0",
+    "@supabase/supabase-js": "^2.111.0",
     "axios": "^1.7.2",
     "bcryptjs": "^3.0.3",
     "body-parser": "^1.20.2",
+    "bullmq": "^6.0.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.5.0",
+    "ioredis": "^6.0.0",
+    "jose": "^6.2.8",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.3.3",
+    "next": "^16.2.12",
+    "node-cron": "^4.6.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "concurrently": "^10.0.4",
     "nodemon": "^3.1.4"
   }
 }

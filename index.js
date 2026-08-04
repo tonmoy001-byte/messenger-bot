@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
 const http = require("http");
+const crypto = require("crypto");
 const socketIo = require("socket.io");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -25,6 +26,12 @@ const { retrieveContext, indexKnowledgeEntry, indexProduct, indexAllProducts, in
 const { initPinecone, getIndexStats } = require("./utils/vectorDB");
 const { analyzeConversations, identifyFailurePatterns, suggestKnowledgeAdditions, exportFineTuningData } = require("./utils/conversationAnalyzer");
 const { extractAdContext, trackAdClick, markAdConversion, getUserAdContext, getAdPerformance, getRecentClicks } = require("./utils/adTracking");
+const { isDuplicate, markProcessed, isContentDuplicate, markContentProcessed, atomicDedupCheck, closeRedis } = require("./utils/dedup");
+const { enqueueMessage, getQueueStats, closeQueues } = require("./utils/queue");
+const { closeWorkers } = require("./utils/worker");
+const { isWithinMessagingWindow } = require("./utils/messagingWindow");
+const { purgeExpiredMessages, deleteUserMessages, setMessageExpiry, startAutoPurgeCron } = require("./utils/dataRetention");
+const { handleTokenRevocation } = require("./utils/tokenManager");
 
 const app = express();
 const server = http.createServer(app);
@@ -41,9 +48,11 @@ const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { 
 const chatLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, message: { error: "Rate limit exceeded" } });
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: "Too many auth attempts" } });
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({
+  limit: "10mb",
+  verify: (req, _res, buf) => { req.rawBody = buf.toString(); }
+}));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "dashboard", "dist")));
 app.use(express.static(path.join(__dirname, "landing")));
 
 app.use((req, res, next) => {
@@ -54,9 +63,17 @@ app.use((req, res, next) => {
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────
 function authenticateAdmin(req, res, next) {
+  let token;
   const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "No token provided" });
-  const token = authHeader.split(" ")[1];
+  if (authHeader) {
+    token = authHeader.split(" ")[1];
+  } else {
+    // Fallback: read JWT from httpOnly cookie (for Next.js dashboard)
+    const cookies = req.headers.cookie || "";
+    const match = cookies.match(/admin_token=([^;]+)/);
+    if (match) token = match[1];
+  }
+  if (!token) return res.status(401).json({ error: "No token provided" });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.admin = decoded;
@@ -75,8 +92,8 @@ async function upsertUser(uid, platform, name = null, profilePic = null) {
   );
 }
 
-async function saveMessage(uid, role, content, mediaUrl = null) {
-  await new Message({ uid, role, content, mediaUrl, timestamp: new Date() }).save();
+async function saveMessage(uid, role, content, mediaUrl = null, platform = "messenger") {
+  await Message.save({ uid, role, content, mediaUrl, platform, timestamp: new Date() });
 }
 
 // ─── AUTH ROUTES ──────────────────────────────────────────
@@ -87,8 +104,15 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     if (!admin) return res.status(401).json({ error: "Invalid credentials" });
     const valid = await bcrypt.compare(password, admin.password);
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
-    await Admin.findByIdAndUpdate(admin._id, { lastLoginAt: new Date() });
-    const token = jwt.sign({ id: admin._id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    await Admin.findByIdAndUpdate(admin.id, { lastLoginAt: new Date() });
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    res.cookie("admin_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24,
+    });
     res.json({ token, username: admin.username, role: admin.role });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -181,11 +205,46 @@ app.get("/webhook/messenger", (req, res) => {
 app.post("/webhook/messenger", async (req, res) => {
   const body = req.body;
   if (body.object !== "page") return res.sendStatus(404);
+
+  // Verify webhook signature
+  const signature = req.headers["x-hub-signature-256"];
+  const fbSecret = process.env.FB_APP_SECRET;
+  if (signature && fbSecret) {
+    const rawBodyStr = req.rawBody || "";
+    const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
+    if (signature !== expected) {
+      console.warn(" [Webhook] Invalid Messenger signature");
+      return res.sendStatus(403);
+    }
+  } else if (signature && !fbSecret) {
+    console.warn("[Webhook] FB_APP_SECRET not set — cannot verify signature");
+  }
+
   res.status(200).send("EVENT_RECEIVED");
   for (const entry of body.entry || []) {
     const pageId = entry.id;
     for (const event of entry.messaging || []) {
-      try { await handleMessengerEvent(event, pageId); } catch (err) { console.error(" Messenger Error:", err.message); }
+      try {
+        const mid = event.message?.mid;
+        const senderId = event.sender?.id;
+        const text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload || "";
+
+        // Atomic dedup - single operation prevents race condition
+        if (mid || (senderId && text && !event.message?.is_echo)) {
+          if (await atomicDedupCheck(mid, senderId, text && !event.message?.is_echo ? text : null)) {
+            console.log(` [Dedup] Skipping duplicate message: ${mid || senderId}`);
+            continue;
+          }
+        }
+
+        // Loop guard: ignore echoes from our own page
+        if (senderId === pageId) {
+          console.log(` [Loop] Skipping echo from own page: ${pageId}`);
+          continue;
+        }
+
+        await handleMessengerEvent(event, pageId);
+      } catch (err) { console.error(" Messenger Error:", err.message); }
     }
   }
 });
@@ -204,6 +263,20 @@ app.get("/webhook/whatsapp", (req, res) => {
 app.post("/webhook/whatsapp", async (req, res) => {
   const body = req.body;
   if (body.object === "whatsapp_business_account") {
+    // Verify webhook signature (X-Hub-Signature-256)
+    const signature = req.headers["x-hub-signature-256"];
+    const fbSecret = process.env.FB_APP_SECRET;
+    if (signature && fbSecret) {
+      const rawBodyStr = req.rawBody || "";
+      const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
+      if (signature !== expected) {
+        console.warn(" [Webhook] Invalid WhatsApp signature");
+        return res.sendStatus(403);
+      }
+    } else if (signature && !fbSecret) {
+      console.warn("[Webhook] FB_APP_SECRET not set — cannot verify WhatsApp signature");
+    }
+
     res.status(200).send("EVENT_RECEIVED");
     for (const entry of body.entry || []) {
       const wabaId = entry.id;
@@ -211,7 +284,20 @@ app.post("/webhook/whatsapp", async (req, res) => {
         if (change.value && change.value.messages) {
           const contact = (change.value.contacts && change.value.contacts[0]) ? change.value.contacts[0] : null;
           for (const message of change.value.messages) {
-            try { await handleWhatsAppEvent(message, contact, wabaId); } catch (err) { console.error(" WhatsApp Error:", err.message); }
+            try {
+              const from = message.from;
+              const text = message.text?.body || "";
+
+              // Atomic dedup - single operation prevents race condition
+              if (message.id || (from && text)) {
+                if (await atomicDedupCheck(message.id, from, text || null)) {
+                  console.log(` [Dedup] Skipping duplicate WhatsApp message: ${message.id || from}`);
+                  continue;
+                }
+              }
+
+              await handleWhatsAppEvent(message, contact, wabaId);
+            } catch (err) { console.error(" WhatsApp Error:", err.message); }
           }
         }
       }
@@ -233,11 +319,46 @@ app.get("/webhook/instagram", (req, res) => {
 app.post("/webhook/instagram", async (req, res) => {
   const body = req.body;
   if (body.object !== "instagram") return res.sendStatus(404);
+
+  // Verify webhook signature
+  const signature = req.headers["x-hub-signature-256"];
+  const fbSecret = process.env.FB_APP_SECRET;
+  if (signature && fbSecret) {
+    const rawBodyStr = req.rawBody || "";
+    const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
+    if (signature !== expected) {
+      console.warn(" [Webhook] Invalid Instagram signature");
+      return res.sendStatus(403);
+    }
+  } else if (signature && !fbSecret) {
+    console.warn("[Webhook] FB_APP_SECRET not set — cannot verify Instagram signature");
+  }
+
   res.status(200).send("EVENT_RECEIVED");
   for (const entry of body.entry || []) {
     const pageId = entry.id;
     for (const event of entry.messaging || []) {
-      try { await handleInstagramEvent(event, pageId); } catch (err) { console.error(" Instagram Error:", err.message); }
+      try {
+        const mid = event.message?.mid || event.mid;
+        const senderId = event.sender?.id;
+        const text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload || "";
+
+        // Atomic dedup - single operation prevents race condition
+        if (mid || (senderId && text && !event.message?.is_echo)) {
+          if (await atomicDedupCheck(mid, senderId, text && !event.message?.is_echo ? text : null)) {
+            console.log(` [Dedup] Skipping duplicate Instagram message: ${mid || senderId}`);
+            continue;
+          }
+        }
+
+        // Loop guard: ignore echoes from own page
+        if (senderId === pageId) {
+          console.log(` [Loop] Skipping echo from own IG page: ${pageId}`);
+          continue;
+        }
+
+        await handleInstagramEvent(event, pageId);
+      } catch (err) { console.error(" Instagram Error:", err.message); }
     }
   }
 });
@@ -247,15 +368,15 @@ app.get("/api/admin/conversations", adminLimiter, authenticateAdmin, async (req,
   try {
     const users = await User.find().sort({ lastSeen: -1 });
     const convos = await Promise.all(users.map(async (u) => {
-      const lastMsg = await Message.findOne({ uid: u.uid }).sort({ timestamp: -1 });
-      return { customerId: u.uid, customerName: u.name, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.timestamp : u.lastSeen, unread: false };
+      const lastMsg = await Message.findOne({ uid: u.uid }).sort({ createdAt: -1 });
+      return { customerId: u.uid, customerName: u.name, customerPhone: u.phone, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.createdAt : u.lastSeen, unread: false };
     }));
     res.json(convos);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/api/admin/messages/:uid", adminLimiter, authenticateAdmin, async (req, res) => {
-  try { const messages = await Message.find({ uid: req.params.uid }).sort({ timestamp: 1 }); res.json(messages); }
+  try { const messages = await Message.find({ uid: req.params.uid }).sort({ createdAt: 1 }); res.json(messages); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -272,7 +393,7 @@ app.post("/api/admin/reply", adminLimiter, authenticateAdmin, async (req, res) =
 });
 
 app.get("/api/admin/orders", adminLimiter, authenticateAdmin, async (req, res) => {
-  try { const orders = await Order.find().sort({ timestamp: -1 }); res.json(orders); }
+  try { const orders = await Order.find().sort({ createdAt: -1 }); res.json(orders); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -289,7 +410,7 @@ app.get("/api/admin/customers", adminLimiter, authenticateAdmin, async (req, res
 });
 
 app.get("/api/admin/settings", adminLimiter, authenticateAdmin, async (req, res) => {
-  try { let settings = await Settings.findOne({ configId: "global" }); if (!settings) settings = await new Settings().save(); res.json(settings); }
+  try { let settings = await Settings.findOne({ configId: "global" }); if (!settings) settings = await Settings.save({ configId: "global" }); res.json(settings); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -309,7 +430,7 @@ app.get("/api/admin/stats", adminLimiter, authenticateAdmin, async (req, res) =>
     const totalMessages = await Message.countDocuments();
     const conversionRate = totalCustomers > 0 ? ((totalOrders / totalCustomers) * 100).toFixed(2) : 0;
     const sevenDaysAgo = new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const dailyVolume = await Message.aggregate([{ $match: { timestamp: { $gte: sevenDaysAgo } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, count: { $sum: 1 } } }, { $sort: { "_id": 1 } }]);
+    const dailyVolume = await Message.aggregate([{ $match: { createdAt: { $gte: sevenDaysAgo } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } }, { $sort: { "_id": 1 } }]);
     const platformStats = await User.aggregate([{ $group: { _id: "$platform", count: { $sum: 1 } } }]);
     res.json({
       stats: { orders: { value: totalOrders, change: "+10%", up: true }, revenue: { value: totalRevenueResult.length > 0 ? totalRevenueResult[0].total : 0, change: "+5%", up: true }, customers: { value: totalCustomers, change: "+12%", up: true }, messages: { value: totalMessages, change: "+8%", up: true }, conversionRate: { value: `${conversionRate}%`, change: "+2%", up: true } },
@@ -327,11 +448,13 @@ app.get("/api/admin/stats/real", adminLimiter, authenticateAdmin, async (req, re
     const totalRevenue = totalRevenueResult.length > 0 ? totalRevenueResult[0].total : 0;
     const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    const messagesToday = await Message.countDocuments({ timestamp: { $gte: today } });
+    const messagesToday = await Message.countDocuments({ createdAt: { $gte: today } });
     const sevenDaysAgo = new Date(); sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const revenueByDay = await Order.aggregate([{ $match: { timestamp: { $gte: sevenDaysAgo } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, revenue: { $sum: "$totalAmount" }, orders: { $sum: 1 } } }, { $sort: { "_id": 1 } }]);
+    const revenueByDay = await Order.aggregate([{ $match: { createdAt: { $gte: sevenDaysAgo } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, revenue: { $sum: "$totalAmount" }, orders: { $sum: 1 } } }, { $sort: { "_id": 1 } }]);
     const platformBreakdown = await User.aggregate([{ $group: { _id: "$platform", count: { $sum: 1 } } }]).then(r => r.map(x => ({ platform: x._id, count: x.count })));
-    res.json({ totalCustomers, totalOrders, totalRevenue, avgOrderValue, messagesToday, revenueByDay: revenueByDay.map(d => ({ day: d._id, revenue: d.revenue, orders: d.orders })), platformBreakdown });
+    // Include queue stats
+    const queueStats = await getQueueStats().catch(() => ({}));
+    res.json({ totalCustomers, totalOrders, totalRevenue, avgOrderValue, messagesToday, revenueByDay: revenueByDay.map(d => ({ day: d._id, revenue: d.revenue, orders: d.orders })), platformBreakdown, queueStats });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -364,6 +487,24 @@ app.put("/api/admin/customers/:id/tags", adminLimiter, authenticateAdmin, async 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── GDPR: Delete user messages (right to erasure) ───────────
+app.delete("/api/users/:uid/messages", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { uid } = req.params;
+    const result = await deleteUserMessages(uid);
+    res.json({ success: true, deleted: result.deleted });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── DATA RETENTION: Manual purge endpoint ────────────────────
+app.post("/api/admin/data-retention/purge", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { days } = req.body;
+    const result = await purgeExpiredMessages(days || 30);
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.put("/api/admin/settings/ai-model", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
     const { model } = req.body;
@@ -390,10 +531,10 @@ app.get("/api/export/customers", adminLimiter, authenticateAdmin, async (req, re
 
 app.get("/api/export/orders", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
-    const orders = await Order.find().sort({ timestamp: -1 });
+    const orders = await Order.find().sort({ createdAt: -1 });
     const rows = [["Order ID", "Customer", "Platform", "Items", "Total", "Status", "Date"]];
     for (const o of orders) {
-      rows.push([o._id.toString(), o.customerName || o.uid, o.platform || "unknown", o.details || "", o.totalAmount, o.status, o.timestamp ? o.timestamp.toISOString() : ""]);
+      rows.push([o.id, o.customerName || o.uid, o.platform || "unknown", o.details || "", o.totalAmount, o.status, o.createdAt ? new Date(o.createdAt).toISOString() : ""]);
     }
     const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
     res.setHeader("Content-Type", "text/csv");
@@ -410,7 +551,7 @@ app.get("/api/admin/search", adminLimiter, authenticateAdmin, async (req, res) =
     const customers = await User.find({ $or: [{ name: regex }, { uid: regex }, { email: regex }, { phone: regex }] }).limit(10);
     const orders = await Order.find({ $or: [{ customerName: regex }, { uid: regex }, { details: regex }] }).limit(10);
     const messages = await Message.find({ content: regex }).limit(20);
-    res.json({ customers: customers.map(c => ({ id: c.uid, name: c.name, platform: c.platform })), orders: orders.map(o => ({ id: o._id, customer: o.customerName, status: o.status })), messages: messages.map(m => ({ uid: m.uid, content: m.content, role: m.role })) });
+    res.json({ customers: customers.map(c => ({ id: c.uid, name: c.name, platform: c.platform })), orders: orders.map(o => ({ id: o.id, customer: o.customerName, status: o.status })), messages: messages.map(m => ({ uid: m.uid, content: m.content, role: m.role })) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -419,7 +560,7 @@ app.put("/api/admin/notifications/:id/read", adminLimiter, authenticateAdmin, as
 app.get("/api/admin/audit-logs", adminLimiter, authenticateAdmin, async (req, res) => { try { res.json([]); } catch (err) { res.status(500).json({ error: err.message }); } });
 
 app.get("/api/admin/team", adminLimiter, authenticateAdmin, async (req, res) => {
-  try { const admins = await Admin.find({}, { username: 1, role: 1, lastLoginAt: 1, isActive: 1 }); res.json(admins); }
+  try { const admins = await Admin.find({}).select("-password"); res.json(admins); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -427,7 +568,7 @@ app.post("/api/admin/team/invite", adminLimiter, authenticateAdmin, async (req, 
   try {
     const { username, password, role } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
-    const admin = await new Admin({ username, password: hashedPassword, role: role || "agent" }).save();
+    const admin = await Admin.save({ username, password: hashedPassword, role: role || "agent" });
     res.json({ success: true, admin: { username: admin.username, role: admin.role } });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -469,6 +610,11 @@ async function handleMessengerEvent(event, pageId) {
   try {
     const senderId = event.sender?.id;
     if (!senderId || event.message?.is_echo) return;
+    // Loop guard: skip messages from the page itself
+    if (senderId === pageId) {
+      console.log(` [Loop] Messenger: skipping echo from page ${pageId}`);
+      return;
+    }
     let text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload;
     let mediaData = null;
     if (event.message?.attachments && event.message.attachments[0].type === "image") {
@@ -485,7 +631,12 @@ async function handleMessengerEvent(event, pageId) {
         displayName = profile.name || [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim() || profile.first_name || null;
         profilePic = profile.profile_pic || null;
       }
-    } catch (profileErr) {}
+    } catch (profileErr) {
+      // Token may be revoked — check for error code 190
+      if (profileErr?.response?.data?.error?.code === 190) {
+        await handleTokenRevocation("messenger", pageId);
+      }
+    }
     displayName = displayName || `User ${senderId.slice(-8)}`;
     console.log(" [Messenger] %s (%s): \"%s\"", senderId, displayName, text || "[Image]");
     await upsertUser(senderId, "messenger", displayName, profilePic);
@@ -523,7 +674,24 @@ async function handleMessengerEvent(event, pageId) {
     await saveMessage(senderId, "model", reply);
     await sendMessage(senderId, reply, pageId);
     io.emit("new_message", { uid: senderId, role: "model", content: reply, timestamp: new Date() });
-  } catch (err) { console.error(" Messenger Handler Error:", err.message); }
+  } catch (err) {
+    console.error(" Messenger Handler Error:", err.message);
+    // Check for token revocation error
+    if (err?.response?.data?.error?.code === 190) {
+      await handleTokenRevocation("messenger", pageId);
+    }
+    // Error message dedup - max 1 error message per 5 minutes per user
+    try {
+      const senderId = event.sender?.id;
+      if (senderId) {
+        const errorKey = `error:${senderId}:${Math.floor(Date.now() / 300000)}`;
+        if (!await isDuplicate(errorKey)) {
+          await markProcessed(errorKey);
+          await sendMessage(senderId, "I'm having a little trouble right now. Please try again in a moment.", pageId);
+        }
+      }
+    } catch (e) { /* Don't cascade errors */ }
+  }
 }
 
 // ─── WHATSAPP HANDLER ─────────────────────────────────────
@@ -540,7 +708,7 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
     if (!from || (!text && !mediaData)) return;
     console.log(" [WhatsApp] %s (%s): \"%s\"", from, displayName, text || "[Image]");
     await upsertUser(from, "whatsapp", displayName);
-    await saveMessage(from, "user", text || "[Image]");
+    await saveMessage(from, "user", text || "[Image]", null, "whatsapp");
     io.emit("new_message", { uid: from, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName });
     const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
     if (complaint.isComplaint || complaint.isHandoffRequest) {
@@ -558,11 +726,40 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
       return;
     }
 
+    // 24-hour window check
+    const withinWindow = await isWithinMessagingWindow(from, "whatsapp");
+    if (!withinWindow) {
+      console.log(` [WhatsApp] Outside 24h window for ${from}, attempting utility tag...`);
+      const { sendViaTagIfExpired } = require("./utils/messagingWindow");
+      const tagResult = await sendViaTagIfExpired(from, "whatsapp", "We received your message! Our team will respond during business hours.");
+      if (!tagResult) {
+        console.log(` [WhatsApp] Cannot send to ${from} — outside 24h window and no tag available`);
+        return;
+      }
+    }
+
     const reply = await generateReply(from, text, mediaData, displayName);
-    await saveMessage(from, "model", reply);
+    await saveMessage(from, "model", reply, null, "whatsapp");
     await sendWhatsAppMessage(from, reply, wabaId);
     io.emit("new_message", { uid: from, role: "model", content: reply, timestamp: new Date() });
-  } catch (err) { console.error(" WhatsApp Handler Error:", err.message); }
+  } catch (err) {
+    console.error(" WhatsApp Handler Error:", err.message);
+    // Check for token revocation
+    if (err?.response?.data?.error?.code === 190 || err?.response?.data?.error?.message?.includes("OAuthException")) {
+      await handleTokenRevocation("whatsapp", process.env.WHATSAPP_BUSINESS_ACCOUNT_ID);
+    }
+    // Error message dedup - max 1 error message per 5 minutes per user
+    try {
+      const from = message.from;
+      if (from) {
+        const errorKey = `error:${from}:${Math.floor(Date.now() / 300000)}`;
+        if (!await isDuplicate(errorKey)) {
+          await markProcessed(errorKey);
+          await sendWhatsAppMessage(from, "I'm having a little trouble right now. Please try again in a moment.", wabaId);
+        }
+      }
+    } catch (e) { /* Don't cascade errors */ }
+  }
 }
 
 // ─── INSTAGRAM HANDLER ────────────────────────────────────
@@ -570,6 +767,11 @@ async function handleInstagramEvent(event, pageId) {
   try {
     const senderId = event.sender?.id;
     if (!senderId || event.message?.is_echo) return;
+    // Loop guard: skip messages from the page itself
+    if (senderId === pageId) {
+      console.log(` [Loop] Instagram: skipping echo from page ${pageId}`);
+      return;
+    }
     let text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload;
     let mediaData = null;
     if (event.message?.attachments && event.message.attachments[0].type === "image") {
@@ -583,11 +785,15 @@ async function handleInstagramEvent(event, pageId) {
     try {
       const profile = await getInstagramUserProfile(senderId, pageId);
       if (profile) { displayName = profile.name || null; profilePic = profile.profile_pic || null; }
-    } catch (profileErr) {}
+    } catch (profileErr) {
+      if (profileErr?.response?.data?.error?.code === 190) {
+        await handleTokenRevocation("instagram", pageId);
+      }
+    }
     displayName = displayName || "IG User " + senderId.slice(-8);
     console.log(' [Instagram] %s (%s): "%s"', senderId, displayName, text || "[Image]");
     await upsertUser(senderId, "instagram", displayName, profilePic);
-    await saveMessage(senderId, "user", text || "[Image]");
+    await saveMessage(senderId, "user", text || "[Image]", null, "instagram");
     io.emit("new_message", { uid: senderId, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName });
     
     // Ad tracking: Check for referral data from Instagram ads
@@ -616,17 +822,33 @@ async function handleInstagramEvent(event, pageId) {
     let reply;
     try { reply = await generateReply(senderId, text, mediaData, displayName, adContext); }
     catch (aiErr) { console.error(" AI Error:", aiErr.message); reply = "Thank you for your message! We'll get back to you shortly."; }
-    await saveMessage(senderId, "model", reply);
+    await saveMessage(senderId, "model", reply, null, "instagram");
     await sendInstagramMessage(senderId, reply, pageId);
     io.emit("new_message", { uid: senderId, role: "model", content: reply, timestamp: new Date() });
-  } catch (err) { console.error(" Instagram Handler Error:", err.message); }
+  } catch (err) {
+    console.error(" Instagram Handler Error:", err.message);
+    if (err?.response?.data?.error?.code === 190) {
+      await handleTokenRevocation("instagram", pageId);
+    }
+    // Error message dedup - max 1 error message per 5 minutes per user
+    try {
+      const senderId = event.sender?.id;
+      if (senderId) {
+        const errorKey = `error:${senderId}:${Math.floor(Date.now() / 300000)}`;
+        if (!await isDuplicate(errorKey)) {
+          await markProcessed(errorKey);
+          await sendInstagramMessage(senderId, "I'm having a little trouble right now. Please try again in a moment.", pageId);
+        }
+      }
+    } catch (e) { /* Don't cascade errors */ }
+  }
 }
 
 // ── FEEDBACK & AI LEARNING ENDPOINTS ────────────────────────────────
 app.post("/api/admin/feedback", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
     const { messageId, uid, platform, rating, userMessage, aiResponse, correctedResponse, feedback, tags } = req.body;
-    const entry = await new Feedback({ messageId, uid, platform, rating, userMessage, aiResponse, correctedResponse, feedback, tags }).save();
+    const entry = await Feedback.save({ messageId, uid, platform, rating, userMessage, aiResponse, correctedResponse, feedback, tags });
     res.json({ success: true, feedback: entry });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -678,6 +900,36 @@ app.get("/api/admin/feedback/stats", adminLimiter, authenticateAdmin, async (req
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get("/api/admin/analytics", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { days = 30 } = req.query;
+    const daysNum = parseInt(days);
+    const since = new Date();
+    since.setDate(since.getDate() - daysNum);
+
+    const totalMessages = await Message.countDocuments({ createdAt: { $gte: since } });
+    const uniqueCustomers = await User.countDocuments({ createdAt: { $gte: since } });
+
+    const messagesByDay = await Message.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]);
+
+    const platformBreakdown = await User.aggregate([
+      { $group: { _id: "$platform", count: { $sum: 1 } } },
+    ]).then((r) => r.reduce((acc, x) => { acc[x._id || "unknown"] = x.count; return acc; }, {}));
+
+    res.json({
+      totalMessages,
+      uniqueCustomers,
+      avgResponseTime: "< 1s",
+      messagesByDay: messagesByDay.map((d) => ({ date: d._id, count: d.count })),
+      platformBreakdown,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get("/api/admin/analytics/conversations", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
     const { days = 7 } = req.query;
@@ -711,20 +963,36 @@ app.get("/api/admin/ai-performance", adminLimiter, authenticateAdmin, async (req
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
 
-    const totalConversations = await Message.distinct("uid", { timestamp: { $gte: startDate } }).then(r => r.length);
-    const feedbackStats = await Feedback.aggregate([
+    let totalConversations = 0;
+    try { totalConversations = await Message.distinct("uid", { createdAt: { $gte: startDate } }).then(r => r.length); } catch(e) { console.warn("ai-perf distinct:", e.message); }
+
+    let feedbackStats = [];
+    try { feedbackStats = await Feedback.aggregate([
       { $match: { createdAt: { $gte: startDate } } },
       { $group: { _id: null, count: { $sum: 1 }, avgRating: { $avg: "$rating" } } }
-    ]);
+    ]); } catch(e) { console.warn("ai-perf feedback agg:", e.message); }
 
-    const handoffs = await User.countDocuments({ "metadata.handoffStatus": { $in: ["human_requested", "human_assigned"] } });
-    const complaints = await Feedback.countDocuments({ tags: "complaint", createdAt: { $gte: startDate } });
-    const orders = await Order.countDocuments({ timestamp: { $gte: startDate } });
+    let handoffs = 0;
+    try {
+      const handoffUsers = await User.find({ metadata: { $contains: { handoffStatus: "human_requested" } } });
+      const assignedUsers = await User.find({ metadata: { $contains: { handoffStatus: "human_assigned" } } });
+      handoffs = handoffUsers.length + assignedUsers.length;
+    } catch(e) { console.warn("ai-perf handoffs:", e.message); }
 
-    const revenueResult = await Order.aggregate([
-      { $match: { timestamp: { $gte: startDate } } },
-      { $group: { _id: null, total: { $sum: "$totalAmount" } } }
-    ]);
+    let complaints = 0;
+    try { complaints = await Feedback.countDocuments({ tags: { $contains: ["complaint"] }, createdAt: { $gte: startDate } }); } catch(e) { console.warn("ai-perf complaints:", e.message); }
+
+    let orders = 0;
+    try { orders = await Order.countDocuments({ createdAt: { $gte: startDate } }); } catch(e) { console.warn("ai-perf orders:", e.message); }
+
+    let revenue = 0;
+    try {
+      const revenueResult = await Order.aggregate([
+        { $match: { createdAt: { $gte: startDate } } },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } }
+      ]);
+      revenue = revenueResult[0]?.total || 0;
+    } catch(e) { console.warn("ai-perf revenue:", e.message); }
 
     const automationRate = totalConversations > 0 ? (((totalConversations - handoffs) / totalConversations) * 100).toFixed(1) : 0;
 
@@ -736,7 +1004,7 @@ app.get("/api/admin/ai-performance", adminLimiter, authenticateAdmin, async (req
       handoffs,
       complaints,
       orders,
-      revenue: revenueResult[0]?.total || 0
+      revenue
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -791,27 +1059,22 @@ app.get("/api/admin/ads/stats", adminLimiter, authenticateAdmin, async (req, res
 
     const totalAds = await Ad.countDocuments({ status: { $in: ["active", "paused"] } });
     const totalClicks = await AdClick.countDocuments({ clickedAt: { $gte: startDate } });
-    const totalConversions = await AdClick.countDocuments({ converted: true, clickedAt: { $gte: startDate } });
+    const totalConversions = await AdClick.countDocuments({ conversationStarted: true, clickedAt: { $gte: startDate } });
     const conversionRate = totalClicks > 0 ? ((totalConversions / totalClicks) * 100).toFixed(1) : 0;
 
-    const revenueResult = await AdClick.aggregate([
-      { $match: { converted: true, clickedAt: { $gte: startDate } } },
-      { $lookup: { from: "orders", localField: "orderId", foreignField: "_id", as: "order" } },
-      { $unwind: { path: "$order", preserveNullAndEmptyArrays: true } },
-      { $group: { _id: null, totalRevenue: { $sum: "$order.totalAmount" } } }
-    ]);
+    const revenueClicks = await AdClick.find({ orderPlaced: true, clickedAt: { $gte: startDate } });
+    const totalRevenue = revenueClicks.reduce((sum, c) => sum + (parseFloat(c.revenue) || 0), 0);
 
     const topAds = await Ad.find({ status: { $in: ["active", "paused"] } })
       .sort({ totalConversations: -1 })
-      .limit(5)
-      .select("adId campaignName adName totalClicks totalConversations totalOrders totalRevenue");
+      .limit(5);
 
     res.json({
       totalAds,
       totalClicks,
       totalConversions,
       conversionRate: parseFloat(conversionRate),
-      totalRevenue: revenueResult[0]?.totalRevenue || 0,
+      totalRevenue,
       topAds
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -841,6 +1104,96 @@ app.get("/api/products/category/:category", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── ADMIN PRODUCT CRUD ──────────────────────────────────────
+app.get("/api/admin/products", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { category, isActive, search } = req.query;
+    const filter = {};
+    if (category) filter.category = category;
+    if (isActive !== undefined) filter.isActive = isActive === "true";
+    const products = await Product.find(filter).sort({ category: 1, createdAt: -1 });
+    if (search) {
+      const q = search.toLowerCase();
+      return res.json(products.filter(p =>
+        (p.name && p.name.toLowerCase().includes(q)) ||
+        (p.description && p.description.toLowerCase().includes(q))
+      ));
+    }
+    res.json(products);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const product = await Product.findOne({ id: req.params.id });
+    if (!product) return res.status(404).json({ error: "Product not found" });
+    res.json(product);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post("/api/admin/products", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { name, description, price, category, image, imageUrl, keywords, inStock, isActive } = req.body;
+    if (!name || price === undefined) {
+      return res.status(400).json({ error: "name and price are required" });
+    }
+    const product = await Product.create({
+      name,
+      description: description || "",
+      price: Number(price),
+      category: category || "products",
+      image: image || "",
+      imageUrl: imageUrl || "",
+      keywords: keywords || [],
+      inStock: inStock !== false,
+      isActive: isActive !== false
+    });
+    console.log(`[Admin] Product created: ${product.name} (ID: ${product.id})`);
+    res.status(201).json({ success: true, product });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const existing = await Product.findOne({ id: req.params.id });
+    if (!existing) return res.status(404).json({ error: "Product not found" });
+
+    const updates = {};
+    const allowed = ["name", "description", "price", "category", "image", "imageUrl", "keywords", "inStock", "isActive"];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    if (updates.price !== undefined) updates.price = Number(updates.price);
+
+    await Product.findOneAndUpdate({ id: req.params.id }, { $set: updates });
+    const updated = await Product.findOne({ id: req.params.id });
+    console.log(`[Admin] Product updated: ${updated.name} (ID: ${updated.id})`);
+    res.json({ success: true, product: updated });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const product = await Product.findOne({ id: req.params.id });
+    if (!product) return res.status(404).json({ error: "Product not found" });
+
+    await Product.findOneAndUpdate({ id: req.params.id }, { $set: { isActive: false } });
+    console.log(`[Admin] Product soft-deleted: ${product.name} (ID: ${product.id})`);
+    res.json({ success: true, message: "Product deactivated" });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put("/api/admin/products/:id/restore", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const product = await Product.findOne({ id: req.params.id });
+    if (!product) return res.status(404).json({ error: "Product not found" });
+
+    await Product.findOneAndUpdate({ id: req.params.id }, { $set: { isActive: true } });
+    console.log(`[Admin] Product restored: ${product.name} (ID: ${product.id})`);
+    res.json({ success: true, product: await Product.findOne({ id: req.params.id }) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // Orders API (for AI order flow)
 app.post("/api/orders/from-ai", async (req, res) => {
   try {
@@ -850,19 +1203,21 @@ app.post("/api/orders/from-ai", async (req, res) => {
     }
     
     const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    const orderId = "ORD-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
     
     const order = await Order.create({
+      orderId,
       uid,
       customerName: customerName || "AI Customer",
       customerPhone: customerPhone || "",
       items,
       totalAmount,
-      deliveryAddress: deliveryAddress || "",
+      shippingAddress: deliveryAddress ? { address: deliveryAddress } : {},
       notes: notes || "",
       status: "pending"
     });
     
-    res.json({ success: true, order });
+    res.json({ success: true, orderId: order.orderId, order });
   } catch (err) {
     console.error(" [Orders API] Error:", err.message);
     res.status(500).json({ error: err.message });
@@ -870,30 +1225,170 @@ app.post("/api/orders/from-ai", async (req, res) => {
 });
 
 // ─── KNOWLEDGE BASE API ────────────────────────────────────
+// GET entries (optional ?type=business_info|rag filter)
 app.get("/api/admin/knowledge", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
-    const entries = await KnowledgeBase.find().sort({ createdAt: -1 });
+    const filter = {};
+    if (req.query.type) filter.type = req.query.type;
+    const entries = await KnowledgeBase.find(filter).sort({ createdAt: -1 });
     res.json(entries);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// GET business_info entries only (for AI system prompt)
+app.get("/api/admin/knowledge/business-info", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const entries = await KnowledgeBase.find({ type: "business_info", isActive: true }).sort({ createdAt: -1 });
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST create entry (supports type: "business_info" | "rag")
 app.post("/api/admin/knowledge", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
-    const { title, content, category, tags } = req.body;
+    const { title, content, category, tags, type } = req.body;
     if (!title || !content) return res.status(400).json({ error: "Title and content are required" });
-    const entry = await new KnowledgeBase({ title, content, category: category || "general", tags: tags || [] }).save();
+    const entry = await KnowledgeBase.save({
+      title,
+      content,
+      category: category || "general",
+      tags: tags || [],
+      type: type || "rag",
+      isActive: true
+    });
     res.json({ success: true, entry });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// PUT update entry
+app.put("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const { title, content, category, tags, type, isActive } = req.body;
+    const update = {};
+    if (title !== undefined) update.title = title;
+    if (content !== undefined) update.content = content;
+    if (category !== undefined) update.category = category;
+    if (tags !== undefined) update.tags = tags;
+    if (type !== undefined) update.type = type;
+    if (isActive !== undefined) update.isActive = isActive;
+    update.updatedAt = new Date().toISOString();
+    const entry = await KnowledgeBase.findByIdAndUpdate(req.params.id, { $set: update });
+    res.json({ success: true, entry });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE entry
 app.delete("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, async (req, res) => {
   try {
     await KnowledgeBase.findByIdAndDelete(req.params.id);
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST upload file as knowledge entry (txt, md, csv)
+app.post("/api/admin/knowledge/upload", adminLimiter, authenticateAdmin, async (req, res) => {
+  try {
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", async () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+
+        // Parse multipart form data manually
+        const contentType = req.headers["content-type"] || "";
+        if (!contentType.includes("multipart/form-data")) {
+          return res.status(400).json({ error: "Expected multipart/form-data" });
+        }
+
+        const boundary = contentType.split("boundary=")[1];
+        if (!boundary) return res.status(400).json({ error: "Missing boundary" });
+
+        const parts = raw.split("--" + boundary);
+        let fileContent = "";
+        let fileName = "uploaded-file.txt";
+        let fileType = "rag";
+
+        for (const part of parts) {
+          if (!part.includes("Content-Disposition")) continue;
+          const [headerSection, ...bodyParts] = part.split("\r\n\r\n");
+          const body = bodyParts.join("\r\n\r\n").replace(/\r\n--$/, "").trim();
+
+          if (headerSection.includes('name="file"')) {
+            const nameMatch = headerSection.match(/filename="(.+?)"/);
+            if (nameMatch) fileName = nameMatch[1];
+            fileContent = body;
+          } else if (headerSection.includes('name="type"')) {
+            fileType = body.trim();
+          }
+        }
+
+        if (!fileContent) {
+          return res.status(400).json({ error: "No file content provided" });
+        }
+
+        // Split large files into chunks of ~4000 chars for knowledge entries
+        const MAX_CHUNK = 4000;
+        const entries = [];
+        if (fileContent.length <= MAX_CHUNK) {
+          const entry = await KnowledgeBase.save({
+            title: fileName,
+            content: fileContent,
+            category: "uploaded",
+            tags: [],
+            type: fileType,
+            isActive: true
+          });
+          entries.push(entry);
+        } else {
+          // Split into chunks
+          const lines = fileContent.split("\n");
+          let chunk = "";
+          let chunkIndex = 1;
+          for (const line of lines) {
+            if ((chunk + "\n" + line).length > MAX_CHUNK && chunk) {
+              const entry = await KnowledgeBase.save({
+                title: `${fileName} (part ${chunkIndex})`,
+                content: chunk.trim(),
+                category: "uploaded",
+                tags: [],
+                type: fileType,
+                isActive: true
+              });
+              entries.push(entry);
+              chunkIndex++;
+              chunk = line;
+            } else {
+              chunk += "\n" + line;
+            }
+          }
+          if (chunk.trim()) {
+            const entry = await KnowledgeBase.save({
+              title: `${fileName} (part ${chunkIndex})`,
+              content: chunk.trim(),
+              category: "uploaded",
+              tags: [],
+              type: fileType,
+              isActive: true
+            });
+            entries.push(entry);
+          }
+        }
+
+        res.json({ success: true, entries, count: entries.length });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -956,24 +1451,30 @@ app.post("/api/admin/integrations/woocommerce", adminLimiter, authenticateAdmin,
   }
 });
 
-// ─── SPA FALLBACK ────────────────────────────────────────
-app.get('*', (req, res, next) => {
-  if (!req.path.startsWith('/api/') && !req.path.startsWith('/webhook/')) {
-    res.sendFile(path.join(__dirname, "dashboard", "dist", "index.html"));
-  } else {
-    next();
-  }
+// ─── API 404 ────────────────────────────────────────
+app.use('/api', (req, res) => { res.status(404).json({ error: "Route not found", path: req.url }); });
+app.use('/webhook', (req, res) => { res.status(404).json({ error: "Route not found", path: req.url }); });
+
+// ─── NEXT.JS DASHBOARD ─────────────────────────────────
+const next = require("next");
+const nextApp = next({ dev: false, dir: path.join(__dirname, "dashboard-new") });
+const nextHandler = nextApp.getRequestHandler();
+
+nextApp.prepare().then(() => {
+  console.log(" Dashboard (Next.js) ready");
 });
 
-// ─── CATCH-ALL 404 ────────────────────────────────────────
-app.use((req, res) => { res.status(404).json({ error: "Route not found", path: req.url }); });
+// ─── CATCH-ALL: SERVE DASHBOARD PAGES ──────────────────
+app.all("*", (req, res) => {
+  return nextHandler(req, res);
+});
 
 // ─── INITIALIZE ADMIN ─────────────────────────────────────
 async function initAdmin() {
   const existing = await Admin.findOne({ username: "admin" });
   if (!existing) {
     const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || "admin123", 10);
-    await new Admin({ username: "admin", password: hashed, role: "admin" }).save();
+    await Admin.save({ username: "admin", password: hashed, role: "admin" });
     console.log(" Default admin created (admin/admin123)");
   }
 }
@@ -981,7 +1482,7 @@ async function initAdmin() {
 async function initSettings() {
   const existing = await Settings.findOne({ configId: "global" });
   if (!existing) {
-    await new Settings({ configId: "global" }).save();
+    await Settings.save({ configId: "global" });
     console.log(" Default settings initialized");
   }
 }
@@ -1012,35 +1513,32 @@ async function initRAG() {
 }
 
 // ─── START SERVER ─────────────────────────────────────────
-server.listen(PORT, async () => {
-  try {
-    await connectDB();
-    await initAdmin();
-    await initSettings();
-    await seedProducts();
-    await initTemplates();
-    await initRAG();
-    console.log(`\n${"─".repeat(50)}`);
-    console.log(` Cyberbot AI Server`);
-    console.log(` WebSocket enabled on Port ${PORT}`);
-    console.log(` FB_APP_ID: ${process.env.FB_APP_ID ? "Configured " : "MISSING "}`);
-    console.log(` FB_APP_SECRET: ${process.env.FB_APP_SECRET ? "Configured " : "MISSING "}`);
-    console.log(`${"─".repeat(50)}\n`);
-  } catch (err) {
-    console.error(" Failed to initialize server:", err.message);
-    console.error(err.stack);
-    process.exit(1);
-  }
-});
+async function startServer() {
+  await connectDB();
+  await initAdmin();
+  await initSettings();
+  await seedProducts();
+  await initTemplates();
+  await initRAG();
+  startAutoPurgeCron();
+  console.log(`\n${"─".repeat(50)}`);
+  console.log(` Cyberbot AI Server`);
+  console.log(` WebSocket enabled on Port ${PORT}`);
+  console.log(` FB_APP_ID: ${process.env.FB_APP_ID ? "Configured " : "MISSING "}`);
+  console.log(` FB_APP_SECRET: ${process.env.FB_APP_SECRET ? "Configured " : "MISSING "}`);
+  console.log(` VERIFY_TOKEN:  ${process.env.MESSENGER_VERIFY_TOKEN || process.env.VERIFY_TOKEN}`);
+  console.log(` Redis: ${process.env.REDIS_URL || "redis://127.0.0.1:6379"}`);
+  console.log(` Data Retention: auto-purge enabled (daily 3 AM)`);
+  console.log(`${"─".repeat(50)}\n`);
+}
 
-server.on("error", (err) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(` Port ${PORT} is already in use. Please stop the other process or use a different port.`);
-  } else {
-    console.error(" Server error:", err.message);
-  }
-  process.exit(1);
-});
+async function shutdown() {
+  console.log("\n [Server] Shutting down gracefully...");
+  await closeRedis().catch(() => {});
+  await closeQueues().catch(() => {});
+  await closeWorkers().catch(() => {});
+  console.log(" [Server] Cleanup complete.");
+}
 
 io.on("connection", (socket) => {
   socket.on("disconnect", (reason) => {
@@ -1050,15 +1548,39 @@ io.on("connection", (socket) => {
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error(" Unhandled Rejection at:", promise, "reason:", reason);
-  // Don't exit on unhandled rejections during runtime
 });
 
 process.on("uncaughtException", (err) => {
   console.error(" Uncaught Exception:", err.message);
   console.error(err.stack);
-  // Graceful shutdown
+  shutdown();
   process.exit(1);
 });
 
-// Keep process alive
-process.stdin.resume();
+process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
+process.on("SIGTERM", async () => { await shutdown(); process.exit(0); });
+
+if (require.main === module) {
+  server.listen(PORT, async () => {
+    try {
+      await startServer();
+    } catch (err) {
+      console.error(" Failed to initialize server:", err.message);
+      console.error(err.stack);
+      process.exit(1);
+    }
+  });
+
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(` Port ${PORT} is already in use. Please stop the other process or use a different port.`);
+    } else {
+      console.error(" Server error:", err.message);
+    }
+    process.exit(1);
+  });
+
+  process.stdin.resume();
+}
+
+module.exports = { app, server, io, PORT, startServer, shutdown };

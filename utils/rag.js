@@ -19,28 +19,51 @@ const { KnowledgeBase } = require("../db");
  */
 async function retrieveContext(query, sourceFilter = null) {
   try {
-    // Generate query embedding
+    // Try vector search first
     const queryEmbedding = await generateEmbedding(query);
-    if (!queryEmbedding) return "";
+    if (queryEmbedding) {
+      const filter = sourceFilter ? { source: sourceFilter } : {};
+      const matches = await queryVectors(queryEmbedding, filter);
 
-    // Build filter
-    const filter = sourceFilter ? { source: sourceFilter } : {};
+      if (matches.length > 0) {
+        const contexts = matches
+          .filter(m => m.score > 0.5)
+          .map(m => {
+            const meta = m.metadata || {};
+            return `[${meta.source || "info"}] ${meta.content || ""}`;
+          })
+          .join("\n\n");
+        if (contexts) return contexts;
+      }
+    }
 
-    // Search vector DB
-    const matches = await queryVectors(queryEmbedding, filter);
+    // Fallback: direct text search against Supabase knowledge base
+    const queryLower = query.toLowerCase();
+    const keywords = queryLower.split(/\s+/).filter(w => w.length > 2);
 
-    if (matches.length === 0) return "";
+    if (keywords.length === 0) return "";
 
-    // Format results into context
-    const contexts = matches
-      .filter(m => m.score > 0.5) // Only relevant matches
-      .map(m => {
-        const meta = m.metadata || {};
-        return `[${meta.source || "info"}] ${meta.content || ""}`;
-      })
+    const { data: entries, error } = await KnowledgeBase.client
+      .from("knowledge_base")
+      .select("title, content, category")
+      .eq("isActive", true);
+
+    if (error || !entries || entries.length === 0) return "";
+
+    // Score entries by keyword overlap
+    const scored = entries.map(entry => {
+      const text = `${entry.title} ${entry.content}`.toLowerCase();
+      const score = keywords.filter(k => text.includes(k)).length / keywords.length;
+      return { ...entry, score };
+    }).filter(e => e.score > 0.2);
+
+    if (scored.length === 0) return "";
+
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(e => `[knowledge] ${e.title}: ${e.content}`)
       .join("\n\n");
-
-    return contexts;
   } catch (err) {
     console.error(" [RAG] Retrieve context error:", err.message);
     return "";
@@ -57,7 +80,7 @@ async function indexKnowledgeEntry(entry) {
     if (!embedding) return { success: false, error: "Failed to generate embedding" };
 
     const vectors = [{
-      id: `kb-${entry._id}`,
+      id: `kb-${entry.id}`,
       values: embedding,
       metadata: {
         source: "knowledge",
@@ -87,12 +110,12 @@ async function indexProduct(product) {
     if (!embedding) return { success: false, error: "Failed to generate embedding" };
 
     const vectors = [{
-      id: `product-${product._id}`,
+      id: `product-${product.id}`,
       values: embedding,
       metadata: {
         source: "product",
         content,
-        productId: product._id.toString(),
+        productId: product.id,
         name: product.name,
         price: product.price,
         category: product.category,

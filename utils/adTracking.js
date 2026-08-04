@@ -47,10 +47,10 @@ async function trackAdClick(uid, platform, adContext, firstMessage = "") {
           startDate: new Date()
         },
         $set: {
-          campaignName: adContext.campaignName || ad.campaignName || "",
-          adSetName: adContext.adSetName || ad.adSetName || "",
-          adName: adContext.adName || ad.adName || "",
-          creative: adContext.creative || ad.creative || {},
+          campaignName: adContext.campaignName || "",
+          adSetName: adContext.adSetName || "",
+          adName: adContext.adName || "",
+          creative: adContext.creative || {},
           updatedAt: new Date()
         }
       },
@@ -58,15 +58,15 @@ async function trackAdClick(uid, platform, adContext, firstMessage = "") {
     );
     
     // Log the click
-    const click = await new AdClick({
-      adId: adContext.adId,
+    const click = await AdClick.save({
+      ad_id: adContext.adId,
       uid,
       platform,
-      referralData: adContext.referralData || {},
-      firstMessage,
-      conversationStarted: true,
-      clickedAt: new Date()
-    }).save();
+      referral_data: adContext.referralData || {},
+      first_message: firstMessage,
+      conversation_started: true,
+      clicked_at: new Date()
+    });
     
     // Increment ad click count
     await Ad.updateOne(
@@ -75,9 +75,11 @@ async function trackAdClick(uid, platform, adContext, firstMessage = "") {
     );
     
     // Update user with ad context
-    await User.updateOne(
+    const existingUser = await User.findOne({ uid });
+    const currentMetadata = (existingUser && existingUser.metadata) || {};
+    await User.findOneAndUpdate(
       { uid },
-      { $set: { "metadata.adContext": { adId: adContext.adId, campaignName: adContext.campaignName } } }
+      { $set: { metadata: { ...currentMetadata, adContext: { adId: adContext.adId, campaignName: adContext.campaignName } } } }
     );
     
     console.log(` [Ad Tracking] Click tracked: Ad ${adContext.adId} -> User ${uid}`);
@@ -102,7 +104,7 @@ async function markAdConversion(uid, orderId) {
     // Update AdClick
     await AdClick.updateOne(
       { uid, adId },
-      { $set: { converted: true, orderId } }
+      { $set: { orderPlaced: true, orderId } }
     );
     
     // Update Ad stats
@@ -166,7 +168,7 @@ async function getAdPerformance(days = 30) {
     
     const performance = await Promise.all(ads.map(async (ad) => {
       const clicks = await AdClick.countDocuments({ adId: ad.adId, clickedAt: { $gte: startDate } });
-      const conversions = await AdClick.countDocuments({ adId: ad.adId, converted: true, clickedAt: { $gte: startDate } });
+      const conversions = await AdClick.countDocuments({ adId: ad.adId, conversationStarted: true, clickedAt: { $gte: startDate } });
       const conversionRate = clicks > 0 ? ((conversions / clicks) * 100).toFixed(1) : 0;
       
       return {

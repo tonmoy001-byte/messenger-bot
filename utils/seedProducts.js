@@ -183,33 +183,74 @@ async function seedProducts() {
 
 /**
  * Get all products formatted for AI system prompt
+ * Now queries Supabase so synced products (Shopify/WooCommerce) appear in AI responses
  */
-function getProductsForAI() {
-  const byCategory = {
-    products: SAMPLE_PRODUCTS.filter(p => p.category === "products"),
-    courses: SAMPLE_PRODUCTS.filter(p => p.category === "courses"),
-    services: SAMPLE_PRODUCTS.filter(p => p.category === "services")
-  };
+async function getProductsForAI() {
+  try {
+    const { data: dbProducts, error } = await require("../supabaseClient").supabase
+      .from("products")
+      .select("name, price, category, description")
+      .eq("isActive", true)
+      .eq("inStock", true);
 
-  let text = "\n📦 AVAILABLE PRODUCTS FOR SALE:\n";
-  text += "═".repeat(50) + "\n\n";
+    if (error) throw error;
 
-  text += "🖥️ PRODUCTS:\n";
-  byCategory.products.forEach((p, i) => {
-    text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
-  });
+    const products = dbProducts && dbProducts.length > 0 ? dbProducts : SAMPLE_PRODUCTS;
 
-  text += "\n📚 COURSES:\n";
-  byCategory.courses.forEach((p, i) => {
-    text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
-  });
+    const byCategory = {
+      products: products.filter(p => p.category === "products"),
+      courses: products.filter(p => p.category === "courses"),
+      services: products.filter(p => p.category === "services")
+    };
 
-  text += "\n🔧 SERVICES:\n";
-  byCategory.services.forEach((p, i) => {
-    text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
-  });
+    let text = "\n📦 AVAILABLE PRODUCTS FOR SALE:\n";
+    text += "═".repeat(50) + "\n\n";
 
-  return text;
+    text += "🖥️ PRODUCTS:\n";
+    byCategory.products.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    text += "\n📚 COURSES:\n";
+    byCategory.courses.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    text += "\n🔧 SERVICES:\n";
+    byCategory.services.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    return text;
+  } catch (err) {
+    console.error(" [Products] Failed to load from DB, using seed data:", err.message);
+    // Fallback to hardcoded if DB fails
+    const byCategory = {
+      products: SAMPLE_PRODUCTS.filter(p => p.category === "products"),
+      courses: SAMPLE_PRODUCTS.filter(p => p.category === "courses"),
+      services: SAMPLE_PRODUCTS.filter(p => p.category === "services")
+    };
+
+    let text = "\n📦 AVAILABLE PRODUCTS FOR SALE:\n";
+    text += "═".repeat(50) + "\n\n";
+
+    text += "🖥️ PRODUCTS:\n";
+    byCategory.products.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    text += "\n📚 COURSES:\n";
+    byCategory.courses.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    text += "\n🔧 SERVICES:\n";
+    byCategory.services.forEach((p, i) => {
+      text += `  ${i + 1}. ${p.name} - ৳${p.price.toLocaleString()}\n`;
+    });
+
+    return text;
+  }
 }
 
 module.exports = {

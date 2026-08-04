@@ -113,7 +113,7 @@ async function syncShopifyProducts(shopDomain, accessToken) {
     for (const p of products) {
       const existing = await Product.findOne({ externalId: p.externalId, externalSource: "shopify" });
       if (existing) {
-        await Product.findByIdAndUpdate(existing._id, { $set: p });
+        await Product.findByIdAndUpdate(existing.id, { $set: p });
         updated++;
       } else {
         await new Product(p).save();

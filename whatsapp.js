@@ -3,12 +3,14 @@
  * ─────────────────────────────────────────────────────────────
  * WhatsApp Cloud API helper functions.
  * Handles sending text messages and other WhatsApp interactions.
+ * Includes retry wrapper for rate-limited API calls.
  * ─────────────────────────────────────────────────────────────
  */
 
 require("dotenv").config();
 const axios = require("axios");
 const { getWhatsAppToken: getWhatsAppTokenFromManager } = require("./utils/tokenManager");
+const { withRetry } = require("./utils/retry");
 
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -34,12 +36,12 @@ async function sendWhatsAppMessage(to, text, wabaId = null) {
       text: { body: text },
     };
 
-    const response = await axios.post(url, data, {
+    const response = await withRetry(() => axios.post(url, data, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-    });
+    }), "WhatsApp Send");
 
     return response.data;
   } catch (error) {
@@ -131,11 +133,12 @@ async function isWithin24HourWindow(uid) {
   try {
     const { Message } = require("./db");
     const lastCustomerMessage = await Message.findOne({ uid, role: "user" })
-      .sort({ timestamp: -1 });
+      .sort({ createdAt: -1 });
     
     if (!lastCustomerMessage) return false;
     
-    const hoursSinceLastMessage = (Date.now() - lastCustomerMessage.timestamp.getTime()) / (1000 * 60 * 60);
+    const ts = lastCustomerMessage.createdAt || lastCustomerMessage.timestamp;
+    const hoursSinceLastMessage = (Date.now() - new Date(ts).getTime()) / (1000 * 60 * 60);
     return hoursSinceLastMessage < 24;
   } catch (err) {
     console.error(" [24h Window Check Error]:", err.message);

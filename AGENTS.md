@@ -1,0 +1,81 @@
+# Cyberbot — Agent Instructions
+
+## Project Overview
+
+Multi-channel AI chatbot SaaS ("Cyberbot") with Messenger, WhatsApp, Instagram, and website support.
+
+**Stack:** Node.js/Express backend, Next.js 16 (App Router) dashboard, Supabase (PostgreSQL), Groq (Qwen 3.6 27B) + Gemini 2.5 Flash AI, Socket.io real-time.
+
+## Architecture
+
+```
+index.js              → Express server (port 3000), all API routes, webhook handlers
+gemini.js             → AI provider abstraction (Groq primary, Gemini fallback)
+supabaseClient.js     → Supabase client + Mongoose-style Model adapters
+messageQueue.js       → Bull queue with exponential dedup, retry, DLQ
+webhookRetry.js       → Webhook retry queue with dead letter queue
+dashboard-new/        → Next.js 16 dashboard (shadcn/ui, Tailwind CSS 4)
+```
+
+## Code Style
+
+- CommonJS (`require`/`module.exports`) in backend
+- TypeScript in `dashboard-new/`
+- No comments unless requested
+- Follow existing patterns — check neighboring files before adding new ones
+
+## Development Workflow
+
+When working on this project, follow the skill lifecycle:
+
+1. **Bug fix** → `systematic-debugging` → `test-driven-development` → verify
+2. **New feature** → `writing-plans` → implement → `verification-before-completion`
+3. **UI work** → `ui-ux-pro-max` or `frontend-design` for design; shadcn/ui components already installed
+4. **API changes** → Check existing route patterns in `index.js` before adding
+5. **Security review** → `security-and-hardening` from `agent-skills/`
+6. **Performance** → `performance-optimization` from `agent-skills/`
+
+## Key Conventions
+
+- **Auth:** JWT in httpOnly cookies (`admin_token`), `authenticateAdmin` middleware reads header OR cookie
+- **API proxy:** Dashboard → Next.js rewrites → Express backend (port 3000)
+- **Knowledge base:** `type` column: `business_info` (always in prompt) vs `rag` (keyword-matched)
+- **AI prompt:** Built dynamically from `settings` table + `knowledge_base` (business_info entries)
+- **Supabase:** Use existing Model adapters in `supabaseClient.js`, don't write raw SQL for CRUD
+- **shadcn/ui v6:** Uses `@base-ui/react` — `render` prop, not `asChild`
+- **Database:** Quoted camelCase identifiers: `"businessPhone"`, `"businessEmail"`, etc.
+
+## Available Skills
+
+Superpowers skills (auto-discovered):
+- `systematic-debugging` — Use for any bug or test failure
+- `test-driven-development` — Use before implementing features
+- `verification-before-completion` — Use before claiming work is done
+- `writing-plans` — Use for multi-step implementations
+- `brainstorming` — Use before creative/design work
+- `ui-ux-pro-max` — Use for dashboard UI work
+
+Agent-skills (installed to `~/.config/opencode/skills/`):
+- `security-and-hardening` — OWASP audit, input validation
+- `performance-optimization` — Measure first, optimize what matters
+- `api-and-interface-design` — Stable API contracts
+- `code-review-and-quality` — Five-axis review
+- `observability-and-instrumentation` — Structured logging, metrics
+
+All 24 agent-skills available in `agent-skills/skills/` for reference.
+
+## Testing
+
+No formal test framework is set up yet. When adding tests:
+- Backend: Use `jest` or `vitest` for `index.js` unit tests
+- Dashboard: Next.js built-in testing (`@testing-library/react`)
+- Always verify with `node index.js` (backend) and `npm run build` (dashboard) before claiming done
+
+## Common Pitfalls
+
+- Don't use `asChild` on shadcn/ui components — use `render` prop (v6 uses @base-ui/react)
+- Don't hardcode business info in prompts — always fetch from DB via `getBusinessInfoContext()`
+- Don't use `keywords` field in knowledge base — it's `tags`
+- Don't use `name`/`email` in team members — it's `username`/`role`
+- Don't use `POST` for settings save without `updates` parameter — backend expects `{ updates: {...} }`
+- Don't forget `role: "model"` (not `"agent"`) in conversation messages
