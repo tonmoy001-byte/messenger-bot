@@ -39,29 +39,40 @@ async function clearFlowState(uid) {
  * Keywords that indicate purchase intent
  */
 function detectPurchaseIntent(message) {
-  const lowerMsg = message.toLowerCase();
+   const lowerMsg = message.toLowerCase().trim();
 
-  // Explicit buy keywords
-  const buyKeywords = [
-    "buy", "purchase", "order", "কিনতে চাই", "অর্ডার", "কেনা",
-    "want to buy", "need this", "how much", "দাম", "price",
-    "কোর্স", "course", "সার্ভিস", "service", "product", "পণ্য",
-    "এনরোল", "enroll", "রেজিস্টার"
-  ];
+   // Negative patterns — these indicate the user is NOT trying to buy
+   const negativePatterns = [
+     /\b(hi|hello|hey|how are|help|support|question|info|information|about|tell me more|what is|who is|where is|when|why|how (?!much|to)|can you|do you (?!sell|have|offer))\b/,
+     /\b(thank|thanks|appreciate|great|good|nice|love|like|interesting|cool|ok|okay|sure|sounds|yes|no(?!.*buy|.*order|.*purchase))\b/,
+     /\b(just (checking|asking|wondering|curious|looking|browsing|exploring|researching|comparing))\b/,
+   ];
+   if (negativePatterns.some(p => p.test(lowerMsg))) return false;
 
-  const hasBuyKeyword = buyKeywords.some(keyword => lowerMsg.includes(keyword));
-  if (hasBuyKeyword) return true;
+   // Explicit buy keywords — strong purchase signals
+   const buyKeywords = [
+     "buy", "purchase", "ordered", "ordering", "কিনতে চাই", "অর্ডার", "কেনা", "কিনব",
+     "want to buy", "need this", "দাম", "দাম কত",
+     "এনরোল", "enroll", "রেজিস্টার", "registration",
+     "add to cart", "checkout", "place order", "complete order",
+     "subscribe", "subscription", "sign up", "signup",
+   ];
 
-  // Natural language purchase patterns: "I need/want/get X", "Do you sell X", etc.
-  if (/\b(i\s+)?need\b/.test(lowerMsg)) return true;
-  if (/\b(i\s+)?want\b/.test(lowerMsg)) return true;
-  if (/\bsell\b/.test(lowerMsg)) return true;
-  if (/\bavailable\b/.test(lowerMsg)) return true;
-  if (/\bcost\b/.test(lowerMsg)) return true;
-  if (/\btell me.*price/.test(lowerMsg)) return true;
+   const hasBuyKeyword = buyKeywords.some(keyword => lowerMsg.includes(keyword));
+   if (hasBuyKeyword) return true;
 
-  return false;
-}
+   // Contextual purchase patterns — require purchase context words
+   const contextualPatterns = [
+     /\b(i\s+)?(need|want)\s+(to\s+)?(buy|order|purchase|enroll|subscribe|get)\b/,
+     /\bdo\s+you\s+(sell|have|offer|carry)\b/,
+     /\bcan\s+i\s+(buy|order|get|purchase|enroll)\b/,
+     /\bhow\s+much\s+(is|are|does)\b/,
+     /\bprice\s+of\b/,
+     /\b(i\s+)?(interested|looking)\s+to\s+(buy|order|purchase|enroll|subscribe)\b/,
+   ];
+
+   return contextualPatterns.some(p => p.test(lowerMsg));
+ }
 
 /**
  * Parse user intent from natural language input.
