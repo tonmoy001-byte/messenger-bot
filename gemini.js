@@ -22,6 +22,12 @@ const GROQ_MODEL = process.env.GROQ_MODEL || "qwen/qwen-2.5-72b";
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const GEMINI_MODEL = "gemini-2.5-flash";
 
+function isBangla(text) {
+  if (!text) return false;
+  const banglaRange = /[\u0980-\u09FF]/;
+  return banglaRange.test(text);
+}
+
 /**
  * Fetch business_info entries from knowledge_base (type='business_info', isActive=true).
  * These are always included in the AI system prompt.
@@ -291,32 +297,39 @@ async function callGemini(messages, mediaData = null) {
 }
 
 // ─── AI Provider Router ───────────────────────────────────
-// Tries primary provider first, falls back to secondary on failure.
+// Routes Bangla messages to Gemini (strong multilingual support).
+// Tries primary provider first for English, falls back on failure.
 async function callAI(messages, mediaData = null) {
   const primary = AI_PROVIDER === "gemini" ? "gemini" : "groq";
   const secondary = primary === "gemini" ? "groq" : "gemini";
 
+  const lastUserMsg = messages.findLast(m => m.role === "user");
+  const userText = lastUserMsg?.content || "";
+  const containsBangla = isBangla(userText);
+
+  const preferredProvider = containsBangla ? "gemini" : primary;
+  const fallbackProvider = preferredProvider === "gemini" ? "groq" : "gemini";
+
   try {
-    const reply = primary === "groq"
+    const reply = preferredProvider === "groq"
       ? await callGroq(messages, mediaData)
       : await callGemini(messages, mediaData);
-    return { reply, provider: primary };
+    return { reply, provider: preferredProvider };
   } catch (err) {
-    console.error(`[AI] ${primary} failed: ${err.message}`);
+    console.error(`[AI] ${preferredProvider} failed: ${err.message}`);
 
-    // Check if retryable (rate limit, timeout, 5xx)
     const status = err.response?.status || 0;
     const isRetryable = err.code === "ETIMEDOUT" || status === 429 || status === 503 || status === 500;
 
     if (isRetryable) {
-      console.log(`[AI] Falling back to ${secondary}...`);
+      console.log(`[AI] Falling back to ${fallbackProvider}...`);
       try {
-        const reply = secondary === "groq"
+        const reply = fallbackProvider === "groq"
           ? await callGroq(messages, mediaData)
           : await callGemini(messages, mediaData);
-        return { reply, provider: secondary };
+        return { reply, provider: fallbackProvider };
       } catch (fallbackErr) {
-        console.error(`[AI] ${secondary} fallback also failed: ${fallbackErr.message}`);
+        console.error(`[AI] ${fallbackProvider} fallback also failed: ${fallbackErr.message}`);
         throw fallbackErr;
       }
     }
@@ -383,7 +396,8 @@ ${adContext.creative?.call_to_action ? `Call to Action: "${adContext.creative.ca
     ];
 
     const { reply, provider } = await callAI(messages, mediaData);
-    console.log(`[AI] Reply via ${provider} (${AI_PROVIDER === "groq" ? GROQ_MODEL : GEMINI_MODEL})`);
+    const modelLabel = provider === "groq" ? GROQ_MODEL : GEMINI_MODEL;
+    console.log(`[AI] Reply via ${provider} (${modelLabel})`);
     return reply;
 
   } catch (error) {
