@@ -9,6 +9,7 @@ const bcrypt = require("bcryptjs");
 const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
+const next = require("next");
 const { encrypt, decrypt } = require("./security");
 const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick } = require("./db");
 
@@ -32,6 +33,11 @@ const { closeWorkers } = require("./utils/worker");
 const { isWithinMessagingWindow } = require("./utils/messagingWindow");
 const { purgeExpiredMessages, deleteUserMessages, setMessageExpiry, startAutoPurgeCron } = require("./utils/dataRetention");
 const { handleTokenRevocation } = require("./utils/tokenManager");
+
+const dev = process.env.NODE_ENV !== "production";
+const dashboardDir = path.join(__dirname, "dashboard-new");
+const nextApp = next({ dev, dir: dashboardDir });
+const nextHandle = nextApp.getRequestHandler();
 
 const app = express();
 const server = http.createServer(app);
@@ -1456,17 +1462,10 @@ app.use('/api', (req, res) => { res.status(404).json({ error: "Route not found",
 app.use('/webhook', (req, res) => { res.status(404).json({ error: "Route not found", path: req.url }); });
 
 // ─── NEXT.JS DASHBOARD ─────────────────────────────────
-const next = require("next");
-const nextApp = next({ dev: false, dir: path.join(__dirname, "dashboard-new") });
-const nextHandler = nextApp.getRequestHandler();
-
-nextApp.prepare().then(() => {
-  console.log(" Dashboard (Next.js) ready");
-});
 
 // ─── CATCH-ALL: SERVE DASHBOARD PAGES ──────────────────
 app.all("*", (req, res) => {
-  return nextHandler(req, res);
+  return nextHandle(req, res);
 });
 
 // ─── INITIALIZE ADMIN ─────────────────────────────────────
@@ -1514,6 +1513,8 @@ async function initRAG() {
 
 // ─── START SERVER ─────────────────────────────────────────
 async function startServer() {
+  await nextApp.prepare();
+  console.log(" Dashboard (Next.js) ready");
   await connectDB();
   await initAdmin();
   await initSettings();
@@ -1523,7 +1524,7 @@ async function startServer() {
   startAutoPurgeCron();
   console.log(`\n${"─".repeat(50)}`);
   console.log(` Cyberbot AI Server`);
-  console.log(` WebSocket enabled on Port ${PORT}`);
+  console.log(` Dashboard + API on Port ${PORT}`);
   console.log(` FB_APP_ID: ${process.env.FB_APP_ID ? "Configured " : "MISSING "}`);
   console.log(` FB_APP_SECRET: ${process.env.FB_APP_SECRET ? "Configured " : "MISSING "}`);
   console.log(` VERIFY_TOKEN:  ${process.env.MESSENGER_VERIFY_TOKEN || process.env.VERIFY_TOKEN}`);

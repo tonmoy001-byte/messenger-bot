@@ -9,7 +9,9 @@
     "backend": "node index.js",
     "dev": "node index.js",
     "ngrok": "ngrok http 3000",
-    "dev:all": "concurrently -n server,ngrok -c blue,green \"node index.js\" \"ngrok http 3000\""
+    "dev:all": "concurrently -n server,ngrok -c blue,green \"node index.js\" \"ngrok http 3000\"",
+    "build:dashboard": "cd dashboard-new && npm run build",
+    "postinstall": "cd dashboard-new && npm install"
   },
   "dependencies": {
     "@pinecone-database/pinecone": "^7.2.0",

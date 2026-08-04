@@ -2,7 +2,7 @@ import { cookies } from "next/headers"
 import { SignJWT, jwtVerify } from "jose"
 
 const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || "cyberbot-admin-secret-key-change-in-production")
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:3000"
+const BACKEND_URL = process.env.BACKEND_URL || ""
 
 export interface TokenPayload {
   id: string
