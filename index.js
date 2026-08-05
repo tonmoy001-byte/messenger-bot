@@ -20,6 +20,7 @@ const { sendInstagramMessage, sendInstagramTyping, downloadInstagramMedia, getIn
 const { createBkashPayment, executeBkashPayment, createNagadPayment, markCOD } = require("./utils/payments");
 const { matchProducts, buildMatchResponse } = require("./utils/imageMatcher");
 const { detectComplaint } = require("./utils/complaintDetector");
+const { shouldEscalate } = require("./utils/escalation");
 const { sendTemplateMessage, getTemplates, deleteTemplate, createWhatsAppTemplate, seedTemplates } = require("./utils/whatsappTemplates");
 const { testShopifyConnection, syncShopifyProducts, createShopifyOrder, getShopifyOrders, verifyShopifyWebhook } = require("./utils/shopify");
 const { testWooConnection, syncWooProducts, createWooOrder, getWooOrders, verifyWooWebhook } = require("./utils/woocommerce");
@@ -706,6 +707,14 @@ async function handleMessengerEvent(event, pageId) {
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
     }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: senderId },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
+    }
     let settings = await Settings.findOne({ configId: "global" });
     if (!settings) settings = { autoReply: true };
     if (!settings.autoReply) return;
@@ -763,6 +772,14 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
     const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: from, customerName: displayName, complaint, message: text });
+    }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: from },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
     }
     await markWhatsAppAsRead(messageId, wabaId).catch(() => {});
     let settings = await Settings.findOne({ configId: "global" });
@@ -856,6 +873,14 @@ async function handleInstagramEvent(event, pageId) {
     const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
+    }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: senderId },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
     }
     let settings = await Settings.findOne({ configId: "global" });
     if (!settings) settings = { autoReply: true };
