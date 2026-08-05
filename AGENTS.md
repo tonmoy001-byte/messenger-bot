@@ -66,8 +66,9 @@ All 24 agent-skills available in `agent-skills/skills/` for reference.
 
 ## Testing
 
-No formal test framework is set up yet. When adding tests:
-- Backend: Use `jest` or `vitest` for `index.js` unit tests
+Tests use the built-in `node:test` runner (no jest needed). Tests live in `tests/*.test.js`.
+- Run the full backend suite: `npm test` (alias: `npm run test:unit`)
+- Backend: Add unit tests under `tests/` for new `utils/` modules
 - Dashboard: Next.js built-in testing (`@testing-library/react`)
 - Always verify with `node index.js` (backend) and `npm run build` (dashboard) before claiming done
 

@@ -10,6 +10,8 @@
     "dev": "node index.js",
     "ngrok": "ngrok http 3000",
     "dev:all": "concurrently -n server,ngrok -c blue,green \"node index.js\" \"ngrok http 3000\"",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:unit": "node --test tests/rbac.test.js tests/auth.test.js tests/rag.test.js tests/idempotency.test.js tests/escalation.test.js tests/logger.test.js",
     "build:dashboard": "cd dashboard-new && npm run build",
     "postinstall": "cd dashboard-new && npm install"
   },
