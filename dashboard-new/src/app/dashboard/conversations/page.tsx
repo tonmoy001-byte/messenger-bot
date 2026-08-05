@@ -17,11 +17,13 @@ export default function ConversationsPage() {
   const [search, setSearch] = useState("")
   const messagesEnd = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<any>(null)
+  const socketRef = useRef<any>(null)
 
   useEffect(() => { selectedRef.current = selected }, [selected])
 
   useEffect(() => {
     const socket = io("", { transports: ["websocket", "polling"] })
+    socketRef.current = socket
 
     socket.on("new_message", (data: any) => {
       const uid = data.uid
@@ -50,7 +52,7 @@ export default function ConversationsPage() {
 
     socket.on("connect_error", () => {})
 
-    return () => { socket.disconnect() }
+    return () => { socketRef.current = null; socket.disconnect() }
   }, [])
 
   useEffect(() => {
@@ -79,7 +81,9 @@ export default function ConversationsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uid: selected.customerId, message: reply, platform: selected.platform }),
       })
-      setMessages((prev) => [...prev, { role: "model", content: reply, timestamp: new Date().toISOString() }])
+      if (!socketRef.current?.connected) {
+        setMessages((prev) => [...prev, { role: "model", content: reply, timestamp: new Date().toISOString() }])
+      }
       setConversations((prev) => prev.map((c) => (c.customerId === selected.customerId ? { ...c, lastMessage: reply, lastMessageTime: new Date().toISOString() } : c)))
       setReply("")
       setTimeout(() => messagesEnd.current?.scrollIntoView({ behavior: "smooth" }), 100)
