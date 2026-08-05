@@ -41,3 +41,22 @@ test("formatKeywordContext without filter returns all sorted by score, capped at
   assert.strictEqual(lines.length, 3);
   assert.match(lines[0], /\[faq\] B/);
 });
+
+test("formatKeywordContext falls back to unfiltered best-effort when sourceFilter matches nothing", () => {
+  const entries = [
+    { title: "A", content: "1", category: "faq", score: 0.8 },
+    { title: "B", content: "2", category: "faq", score: 0.2 },
+  ];
+  const out = formatKeywordContext(entries, "product");
+  assert.match(out, /\[faq\] A/);
+});
+
+test("formatKeywordContext does not mutate its input", () => {
+  const entries = [
+    { title: "A", content: "1", category: "faq", score: 0.2 },
+    { title: "B", content: "2", category: "faq", score: 0.9 },
+  ];
+  const snapshot = entries.map(e => ({ ...e }));
+  formatKeywordContext(entries, null);
+  assert.deepStrictEqual(entries, snapshot);
+});

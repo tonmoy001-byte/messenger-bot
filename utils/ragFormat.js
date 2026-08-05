@@ -15,7 +15,8 @@ function formatVectorContext(matches, scoreThreshold = 0.5) {
 
 function formatKeywordContext(entries, sourceFilter, limit = 3) {
   const filtered = sourceFilter ? entries.filter(e => e.category === sourceFilter) : entries;
-  return filtered
+  const pool = filtered.length > 0 ? filtered : entries;
+  return [...pool]
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map(e => `[${e.category || "knowledge"}] ${e.title}: ${e.content}`)
