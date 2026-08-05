@@ -35,6 +35,9 @@ const { purgeExpiredMessages, deleteUserMessages, setMessageExpiry, startAutoPur
 const { handleTokenRevocation } = require("./utils/tokenManager");
 const { makeRequireRole } = require("./utils/rbac");
 const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
+const { buildOrderKey } = require("./utils/orderIdempotency");
+
+const recentOrders = new Map(); // key -> { createdAt, orderId }
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard-new");
@@ -1248,7 +1251,13 @@ app.post("/api/orders/from-ai", async (req, res) => {
     if (!uid || !items || items.length === 0) {
       return res.status(400).json({ error: "Missing required fields" });
     }
-    
+
+    const orderKey = buildOrderKey(uid, items);
+    const existing = recentOrders.get(orderKey);
+    if (existing && Date.now() - existing.createdAt < 60000) {
+      return res.status(409).json({ success: false, error: "Duplicate order request", orderId: existing.orderId });
+    }
+
     const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
     const orderId = "ORD-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
     
@@ -1263,7 +1272,9 @@ app.post("/api/orders/from-ai", async (req, res) => {
       notes: notes || "",
       status: "pending"
     });
-    
+
+    recentOrders.set(orderKey, { createdAt: Date.now(), orderId: order.orderId });
+
     res.json({ success: true, orderId: order.orderId, order });
   } catch (err) {
     console.error(" [Orders API] Error:", err.message);
