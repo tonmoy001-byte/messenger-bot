@@ -41,14 +41,6 @@ async function clearFlowState(uid) {
 function detectPurchaseIntent(message) {
    const lowerMsg = message.toLowerCase().trim();
 
-   // Negative patterns — these indicate the user is NOT trying to buy
-   const negativePatterns = [
-     /\b(hi|hello|hey|how are|help|support|question|info|information|about|tell me more|what is|who is|where is|when|why|how (?!much|to)|can you|do you (?!sell|have|offer))\b/,
-     /\b(thank|thanks|appreciate|great|good|nice|love|like|interesting|cool|ok|okay|sure|sounds|yes|no(?!.*buy|.*order|.*purchase))\b/,
-     /\b(just (checking|asking|wondering|curious|looking|browsing|exploring|researching|comparing))\b/,
-   ];
-   if (negativePatterns.some(p => p.test(lowerMsg))) return false;
-
    // Explicit buy keywords — strong purchase signals
    const buyKeywords = [
      "buy", "purchase", "ordered", "ordering", "কিনতে চাই", "অর্ডার", "কেনা", "কিনব",
@@ -64,14 +56,27 @@ function detectPurchaseIntent(message) {
    // Contextual purchase patterns — require purchase context words
    const contextualPatterns = [
      /\b(i\s+)?(need|want)\s+(to\s+)?(buy|order|purchase|enroll|subscribe|get)\b/,
-     /\bdo\s+you\s+(sell|have|offer|carry)\b/,
+     /\bdo\s+you\s+(sell|offer|carry)\b/,
+     /\bdo\s+you\s+have\s+(the|a|an|any|it|this|that)\b/,
      /\bcan\s+i\s+(buy|order|get|purchase|enroll)\b/,
      /\bhow\s+much\s+(is|are|does)\b/,
+     /\bwhat('?s| is)\s+(your\s+|the\s+)?(price|cost|rate)\b/,
      /\bprice\s+of\b/,
      /\b(i\s+)?(interested|looking)\s+to\s+(buy|order|purchase|enroll|subscribe)\b/,
    ];
 
-   return contextualPatterns.some(p => p.test(lowerMsg));
+   if (contextualPatterns.some(p => p.test(lowerMsg))) return true;
+
+   // Negative patterns — these indicate the user is NOT trying to buy.
+   // Evaluated last so explicit purchase signals win over broad negatives.
+   const negativePatterns = [
+     /\b(hi|hello|hey|how are|help|support|question|info|information|about|tell me more|who is|where is|when|why|how (?!much|to)|can you|what products|what services|what product line|product list|menu)\b/,
+     /\b(thank|thanks|appreciate|great|good|nice|love|like|interesting|cool|ok|okay|sure|sounds|yes|no(?!.*buy|.*order|.*purchase))\b/,
+     /\b(just (checking|asking|wondering|curious|looking|browsing|exploring|researching|comparing))\b/,
+   ];
+   if (negativePatterns.some(p => p.test(lowerMsg))) return false;
+
+   return false;
  }
 
 /**
