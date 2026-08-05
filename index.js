@@ -121,7 +121,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge: 60 * 60 * 24,
+      maxAge: 24 * 60 * 60 * 1000,
     });
     const refreshToken = signRefreshToken({ id: admin.id, username: admin.username }, JWT_SECRET);
     res.cookie("admin_refresh", refreshToken, {
@@ -152,7 +152,7 @@ app.post("/api/auth/refresh", authLimiter, async (req, res) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge: 60 * 60 * 24,
+      maxAge: 24 * 60 * 60 * 1000,
     });
     res.json({ token, username: admin.username, role: admin.role });
   } catch (err) {
