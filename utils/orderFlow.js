@@ -9,7 +9,7 @@
 const axios = require("axios");
 const { OrderSession, EcommerceConnection, Order } = require("../db");
 const { createShopifyOrder } = require("./shopify");
-const { createWooOrder } = require("./woocommerce");
+const { createWooOrder, updateWooStock } = require("./woocommerce");
 
 const FLOW_STATE = {
   IDLE: "idle",
@@ -578,6 +578,14 @@ async function handleConfirmation(uid, userMessage, data) {
       if (wooResult.success) {
         externalOrderId = wooResult.orderId;
         orderResult = { success: true, orderId: `WC-${wooResult.orderNumber}` };
+        const stockUpdate = await updateWooStock(
+          wooConn.storeUrl,
+          wooConn.consumerKey,
+          wooConn.consumerSecret,
+          selectedProduct.wooData?.productId,
+          (selectedProduct.inStock ?? 0) - quantity
+        );
+        if (!stockUpdate.success) console.error(" [OrderFlow] Woo stock update failed:", stockUpdate.error);
       }
     }
 

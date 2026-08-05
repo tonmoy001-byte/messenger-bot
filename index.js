@@ -20,6 +20,7 @@ const { sendInstagramMessage, sendInstagramTyping, downloadInstagramMedia, getIn
 const { createBkashPayment, executeBkashPayment, createNagadPayment, markCOD } = require("./utils/payments");
 const { matchProducts, buildMatchResponse } = require("./utils/imageMatcher");
 const { detectComplaint } = require("./utils/complaintDetector");
+const { shouldEscalate } = require("./utils/escalation");
 const { sendTemplateMessage, getTemplates, deleteTemplate, createWhatsAppTemplate, seedTemplates } = require("./utils/whatsappTemplates");
 const { testShopifyConnection, syncShopifyProducts, createShopifyOrder, getShopifyOrders, verifyShopifyWebhook } = require("./utils/shopify");
 const { testWooConnection, syncWooProducts, createWooOrder, getWooOrders, verifyWooWebhook } = require("./utils/woocommerce");
@@ -33,6 +34,11 @@ const { closeWorkers } = require("./utils/worker");
 const { isWithinMessagingWindow } = require("./utils/messagingWindow");
 const { purgeExpiredMessages, deleteUserMessages, setMessageExpiry, startAutoPurgeCron } = require("./utils/dataRetention");
 const { handleTokenRevocation } = require("./utils/tokenManager");
+const { makeRequireRole } = require("./utils/rbac");
+const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
+const { buildOrderKey } = require("./utils/orderIdempotency");
+
+const recentOrders = new Map(); // key -> { createdAt, orderId }
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard-new");
@@ -89,6 +95,8 @@ function authenticateAdmin(req, res, next) {
   }
 }
 
+const requireAdmin = makeRequireRole("admin");
+
 // ─── HELPER FUNCTIONS ─────────────────────────────────────
 async function upsertUser(uid, platform, name = null, profilePic = null) {
   await User.findOneAndUpdate(
@@ -117,7 +125,15 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
-      maxAge: 60 * 60 * 24,
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    const refreshToken = signRefreshToken({ id: admin.id, username: admin.username }, JWT_SECRET);
+    res.cookie("admin_refresh", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/api/auth",
+      maxAge: 30 * 24 * 60 * 60 * 1000,
     });
     res.json({ token, username: admin.username, role: admin.role });
   } catch (err) {
@@ -125,7 +141,36 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   }
 });
 
-app.get("/api/auth/meta/url", authenticateAdmin, async (req, res) => {
+app.post("/api/auth/refresh", authLimiter, async (req, res) => {
+  try {
+    const cookies = req.headers.cookie || "";
+    const match = cookies.match(/admin_refresh=([^;]+)/);
+    if (!match) return res.status(401).json({ error: "No refresh token" });
+    const decoded = verifyRefreshToken(match[1], JWT_SECRET);
+    if (!decoded || !decoded.id) return res.status(401).json({ error: "Invalid refresh token" });
+    const admin = await Admin.findOne({ id: decoded.id });
+    if (!admin) return res.status(401).json({ error: "User not found" });
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    res.cookie("admin_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.json({ token, username: admin.username, role: admin.role });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  res.clearCookie("admin_token", { path: "/" });
+  res.clearCookie("admin_refresh", { path: "/api/auth" });
+  res.json({ success: true });
+});
+
+app.get("/api/auth/meta/url", authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const type = req.query.type || "facebook";
     const redirectUri = process.env.META_REDIRECT_URI || `${process.env.BASE_URL || "http://localhost:3000"}/api/auth/meta/callback`;
@@ -420,7 +465,7 @@ app.get("/api/admin/settings", adminLimiter, authenticateAdmin, async (req, res)
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post("/api/admin/settings", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/settings", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const update = req.body.updates || req.body;
     const settings = await Settings.findOneAndUpdate({ configId: "global" }, { $set: update }, { new: true, upsert: true });
@@ -570,7 +615,7 @@ app.get("/api/admin/team", adminLimiter, authenticateAdmin, async (req, res) => 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post("/api/admin/team/invite", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/team/invite", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { username, password, role } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -579,7 +624,7 @@ app.post("/api/admin/team/invite", adminLimiter, authenticateAdmin, async (req, 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete("/api/admin/team/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+app.delete("/api/admin/team/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try { await Admin.findByIdAndDelete(req.params.id); res.json({ success: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -662,6 +707,14 @@ async function handleMessengerEvent(event, pageId) {
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
     }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: senderId },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
+    }
     let settings = await Settings.findOne({ configId: "global" });
     if (!settings) settings = { autoReply: true };
     if (!settings.autoReply) return;
@@ -719,6 +772,14 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
     const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: from, customerName: displayName, complaint, message: text });
+    }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: from },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
     }
     await markWhatsAppAsRead(messageId, wabaId).catch(() => {});
     let settings = await Settings.findOne({ configId: "global" });
@@ -812,6 +873,14 @@ async function handleInstagramEvent(event, pageId) {
     const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
     if (complaint.isComplaint || complaint.isHandoffRequest) {
       io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
+    }
+    if (shouldEscalate(text)) {
+      await User.findOneAndUpdate(
+        { uid: senderId },
+        { $set: { "metadata.handoffStatus": "human_assigned" } },
+        { upsert: true }
+      );
+      io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
     }
     let settings = await Settings.findOne({ configId: "global" });
     if (!settings) settings = { autoReply: true };
@@ -1032,7 +1101,7 @@ app.get("/api/admin/ads/clicks", adminLimiter, authenticateAdmin, async (req, re
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post("/api/admin/ads", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/ads", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { adId, campaignId, campaignName, adSetName, adName, platform, creative, targeting, costPerClick, status } = req.body;
     const ad = await Ad.findOneAndUpdate(
@@ -1044,7 +1113,7 @@ app.post("/api/admin/ads", adminLimiter, authenticateAdmin, async (req, res) => 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.patch("/api/admin/ads/:adId/status", adminLimiter, authenticateAdmin, async (req, res) => {
+app.patch("/api/admin/ads/:adId/status", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { status } = req.body;
     const ad = await Ad.findOneAndUpdate(
@@ -1086,7 +1155,7 @@ app.get("/api/admin/ads/stats", adminLimiter, authenticateAdmin, async (req, res
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete("/api/admin/ads/:adId", adminLimiter, authenticateAdmin, async (req, res) => {
+app.delete("/api/admin/ads/:adId", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     await Ad.deleteOne({ adId: req.params.adId });
     await AdClick.deleteMany({ adId: req.params.adId });
@@ -1137,7 +1206,7 @@ app.get("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post("/api/admin/products", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/products", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { name, description, price, category, image, imageUrl, keywords, inStock, isActive } = req.body;
     if (!name || price === undefined) {
@@ -1159,7 +1228,7 @@ app.post("/api/admin/products", adminLimiter, authenticateAdmin, async (req, res
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+app.put("/api/admin/products/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const existing = await Product.findOne({ id: req.params.id });
     if (!existing) return res.status(404).json({ error: "Product not found" });
@@ -1178,7 +1247,7 @@ app.put("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, 
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.delete("/api/admin/products/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+app.delete("/api/admin/products/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const product = await Product.findOne({ id: req.params.id });
     if (!product) return res.status(404).json({ error: "Product not found" });
@@ -1207,7 +1276,13 @@ app.post("/api/orders/from-ai", async (req, res) => {
     if (!uid || !items || items.length === 0) {
       return res.status(400).json({ error: "Missing required fields" });
     }
-    
+
+    const orderKey = buildOrderKey(uid, items);
+    const existing = recentOrders.get(orderKey);
+    if (existing && Date.now() - existing.createdAt < 60000) {
+      return res.status(409).json({ success: false, error: "Duplicate order request", orderId: existing.orderId });
+    }
+
     const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
     const orderId = "ORD-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).substring(2, 6).toUpperCase();
     
@@ -1222,7 +1297,9 @@ app.post("/api/orders/from-ai", async (req, res) => {
       notes: notes || "",
       status: "pending"
     });
-    
+
+    recentOrders.set(orderKey, { createdAt: Date.now(), orderId: order.orderId });
+
     res.json({ success: true, orderId: order.orderId, order });
   } catch (err) {
     console.error(" [Orders API] Error:", err.message);
@@ -1254,7 +1331,7 @@ app.get("/api/admin/knowledge/business-info", adminLimiter, authenticateAdmin, a
 });
 
 // POST create entry (supports type: "business_info" | "rag")
-app.post("/api/admin/knowledge", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/knowledge", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { title, content, category, tags, type } = req.body;
     if (!title || !content) return res.status(400).json({ error: "Title and content are required" });
@@ -1273,7 +1350,7 @@ app.post("/api/admin/knowledge", adminLimiter, authenticateAdmin, async (req, re
 });
 
 // PUT update entry
-app.put("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+app.put("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { title, content, category, tags, type, isActive } = req.body;
     const update = {};
@@ -1292,7 +1369,7 @@ app.put("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, async (req,
 });
 
 // DELETE entry
-app.delete("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, async (req, res) => {
+app.delete("/api/admin/knowledge/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     await KnowledgeBase.findByIdAndDelete(req.params.id);
     res.json({ success: true });
@@ -1410,7 +1487,7 @@ app.post("/api/admin/knowledge/reindex", adminLimiter, authenticateAdmin, async 
 });
 
 // ─── INTEGRATIONS API (Shopify/WooCommerce) ─────────────────
-app.post("/api/admin/integrations/shopify", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/integrations/shopify", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { storeUrl, accessToken } = req.body;
     if (!storeUrl || !accessToken) return res.status(400).json({ error: "Store URL and access token are required" });
@@ -1433,7 +1510,7 @@ app.post("/api/admin/integrations/shopify", adminLimiter, authenticateAdmin, asy
   }
 });
 
-app.post("/api/admin/integrations/woocommerce", adminLimiter, authenticateAdmin, async (req, res) => {
+app.post("/api/admin/integrations/woocommerce", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try {
     const { storeUrl, consumerKey, consumerSecret } = req.body;
     if (!storeUrl || !consumerKey || !consumerSecret) return res.status(400).json({ error: "Store URL, consumer key, and secret are required" });

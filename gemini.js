@@ -357,7 +357,8 @@ ${adContext.creative?.call_to_action ? `Call to Action: "${adContext.creative.ca
     }
 
     if (userMessage && !mediaData) {
-      const ragContext = await retrieveContext(userMessage);
+      const isProductQuery = /(buy|order|purchase|product|price|cost|৳|how much|what.*price)/i.test(userMessage);
+      const ragContext = await retrieveContext(userMessage, isProductQuery ? "product" : null);
       if (ragContext) {
         systemPrompt = buildRAGPrompt(systemPrompt, ragContext);
       }

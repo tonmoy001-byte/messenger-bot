@@ -10,6 +10,7 @@
 const { generateEmbedding } = require("./embeddings");
 const { queryVectors, upsertVectors, deleteVectors } = require("./vectorDB");
 const { KnowledgeBase } = require("../db");
+const { formatVectorContext, formatKeywordContext } = require("./ragFormat");
 
 /**
  * Search for relevant context given a user query.
@@ -26,13 +27,7 @@ async function retrieveContext(query, sourceFilter = null) {
       const matches = await queryVectors(queryEmbedding, filter);
 
       if (matches.length > 0) {
-        const contexts = matches
-          .filter(m => m.score > 0.5)
-          .map(m => {
-            const meta = m.metadata || {};
-            return `[${meta.source || "info"}] ${meta.content || ""}`;
-          })
-          .join("\n\n");
+        const contexts = formatVectorContext(matches);
         if (contexts) return contexts;
       }
     }
@@ -59,11 +54,7 @@ async function retrieveContext(query, sourceFilter = null) {
 
     if (scored.length === 0) return "";
 
-    return scored
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .map(e => `[knowledge] ${e.title}: ${e.content}`)
-      .join("\n\n");
+    return formatKeywordContext(scored, sourceFilter);
   } catch (err) {
     console.error(" [RAG] Retrieve context error:", err.message);
     return "";
