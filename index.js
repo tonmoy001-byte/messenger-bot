@@ -34,6 +34,7 @@ const { isWithinMessagingWindow } = require("./utils/messagingWindow");
 const { purgeExpiredMessages, deleteUserMessages, setMessageExpiry, startAutoPurgeCron } = require("./utils/dataRetention");
 const { handleTokenRevocation } = require("./utils/tokenManager");
 const { makeRequireRole } = require("./utils/rbac");
+const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard-new");
@@ -122,10 +123,47 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       path: "/",
       maxAge: 60 * 60 * 24,
     });
+    const refreshToken = signRefreshToken({ id: admin.id, username: admin.username }, JWT_SECRET);
+    res.cookie("admin_refresh", refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/api/auth",
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+    });
     res.json({ token, username: admin.username, role: admin.role });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.post("/api/auth/refresh", authLimiter, async (req, res) => {
+  try {
+    const cookies = req.headers.cookie || "";
+    const match = cookies.match(/admin_refresh=([^;]+)/);
+    if (!match) return res.status(401).json({ error: "No refresh token" });
+    const decoded = verifyRefreshToken(match[1], JWT_SECRET);
+    if (!decoded || !decoded.id) return res.status(401).json({ error: "Invalid refresh token" });
+    const admin = await Admin.findOne({ id: decoded.id });
+    if (!admin) return res.status(401).json({ error: "User not found" });
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    res.cookie("admin_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24,
+    });
+    res.json({ token, username: admin.username, role: admin.role });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  res.clearCookie("admin_token", { path: "/" });
+  res.clearCookie("admin_refresh", { path: "/api/auth" });
+  res.json({ success: true });
 });
 
 app.get("/api/auth/meta/url", authenticateAdmin, requireAdmin, async (req, res) => {
