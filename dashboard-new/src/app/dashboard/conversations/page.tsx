@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, useRef } from "react"
+import { io } from "socket.io-client"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -15,6 +16,42 @@ export default function ConversationsPage() {
   const [reply, setReply] = useState("")
   const [search, setSearch] = useState("")
   const messagesEnd = useRef<HTMLDivElement>(null)
+  const selectedRef = useRef<any>(null)
+
+  useEffect(() => { selectedRef.current = selected }, [selected])
+
+  useEffect(() => {
+    const socket = io("", { transports: ["websocket", "polling"] })
+
+    socket.on("new_message", (data: any) => {
+      const uid = data.uid
+      setConversations((prev) => {
+        const exists = prev.some((c) => c.customerId === uid)
+        const existing = prev.find((c) => c.customerId === uid)
+        const updated = {
+          customerId: uid,
+          customerName: data.customerName || existing?.customerName || "Unknown",
+          platform: data.platform || existing?.platform || "messenger",
+          lastMessage: data.content || "",
+          lastMessageTime: data.timestamp || new Date().toISOString(),
+        }
+        return exists ? prev.map((c) => (c.customerId === uid ? { ...c, ...updated } : c)) : [updated, ...prev]
+      })
+      if (selectedRef.current?.customerId === uid) {
+        setMessages((prev) => [...prev, { role: data.role || "model", content: data.content || "", timestamp: data.timestamp }])
+      }
+    })
+
+    socket.on("human_handoff_message", (data: any) => {
+      setConversations((prev) =>
+        prev.map((c) => (c.customerId === data.uid ? { ...c, handoff: true } : c))
+      )
+    })
+
+    socket.on("connect_error", () => {})
+
+    return () => { socket.disconnect() }
+  }, [])
 
   useEffect(() => {
     fetch("/api/admin/conversations")
@@ -43,6 +80,7 @@ export default function ConversationsPage() {
         body: JSON.stringify({ uid: selected.customerId, message: reply, platform: selected.platform }),
       })
       setMessages((prev) => [...prev, { role: "model", content: reply, timestamp: new Date().toISOString() }])
+      setConversations((prev) => prev.map((c) => (c.customerId === selected.customerId ? { ...c, lastMessage: reply, lastMessageTime: new Date().toISOString() } : c)))
       setReply("")
       setTimeout(() => messagesEnd.current?.scrollIntoView({ behavior: "smooth" }), 100)
     } catch {}
