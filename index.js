@@ -74,26 +74,8 @@ app.use((req, res, next) => {
 });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────
-function authenticateAdmin(req, res, next) {
-  let token;
-  const authHeader = req.headers.authorization;
-  if (authHeader) {
-    token = authHeader.split(" ")[1];
-  } else {
-    // Fallback: read JWT from httpOnly cookie (for Next.js dashboard)
-    const cookies = req.headers.cookie || "";
-    const match = cookies.match(/admin_token=([^;]+)/);
-    if (match) token = match[1];
-  }
-  if (!token) return res.status(401).json({ error: "No token provided" });
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.admin = decoded;
-    next();
-  } catch (err) {
-    res.status(401).json({ error: "Invalid token" });
-  }
-}
+const { authenticateTenant } = require("./middleware/auth");
+const authenticateAdmin = authenticateTenant;
 
 const requireAdmin = makeRequireRole("admin");
 
@@ -111,6 +93,42 @@ async function saveMessage(uid, role, content, mediaUrl = null, platform = "mess
 }
 
 // ─── AUTH ROUTES ──────────────────────────────────────────
+app.post("/api/auth/signup", authLimiter, async (req, res) => {
+  const { username, password, role, tenant_id } = req.body;
+  try {
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password are required" });
+    }
+    const existing = await Admin.findOne({ username });
+    if (existing) {
+      return res.status(400).json({ error: "Username already exists" });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newAdmin = await Admin.save({
+      username,
+      password: hashedPassword,
+      role: role || "admin",
+      tenant_id: tenant_id || null,
+      createdAt: new Date(),
+    });
+    const token = jwt.sign(
+      { id: newAdmin.id, username: newAdmin.username, role: newAdmin.role, tenant_id: newAdmin.tenant_id || null },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+    res.cookie("admin_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+    res.status(201).json({ token, username: newAdmin.username, role: newAdmin.role, tenant_id: newAdmin.tenant_id || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/api/auth/login", authLimiter, async (req, res) => {
   const { username, password } = req.body;
   try {
@@ -119,7 +137,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     const valid = await bcrypt.compare(password, admin.password);
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
     await Admin.findByIdAndUpdate(admin.id, { lastLoginAt: new Date() });
-    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null }, JWT_SECRET, { expiresIn: "24h" });
     res.cookie("admin_token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -135,7 +153,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       path: "/api/auth",
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
-    res.json({ token, username: admin.username, role: admin.role });
+    res.json({ token, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -150,7 +168,7 @@ app.post("/api/auth/refresh", authLimiter, async (req, res) => {
     if (!decoded || !decoded.id) return res.status(401).json({ error: "Invalid refresh token" });
     const admin = await Admin.findOne({ id: decoded.id });
     if (!admin) return res.status(401).json({ error: "User not found" });
-    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "24h" });
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null }, JWT_SECRET, { expiresIn: "24h" });
     res.cookie("admin_token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -158,7 +176,7 @@ app.post("/api/auth/refresh", authLimiter, async (req, res) => {
       path: "/",
       maxAge: 24 * 60 * 60 * 1000,
     });
-    res.json({ token, username: admin.username, role: admin.role });
+    res.json({ token, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
