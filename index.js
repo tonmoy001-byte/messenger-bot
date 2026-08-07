@@ -11,7 +11,50 @@ const rateLimit = require("express-rate-limit");
 const path = require("path");
 const next = require("next");
 const { encrypt, decrypt } = require("./security");
-const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick } = require("./db");
+const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./db");
+
+const { runWithTenantContext } = require("./utils/tenantContext");
+const channelCache = require("./utils/channelCache");
+
+async function verifyWebhookToken(req, platform, globalToken) {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+
+  if (mode !== "subscribe") return false;
+
+  const tenantSlug = req.query.tenant;
+  const reqPlatform = req.query.platform || platform;
+
+  if (tenantSlug) {
+    const tenant = await Tenant.findOne({ slug: tenantSlug });
+    if (!tenant) return false;
+
+    const channel = await TenantChannel.findOne({ tenant_id: tenant.id, platform: reqPlatform });
+    if (!channel || channel.deleted_at) return false;
+
+    return token === channel.verifyToken;
+  }
+
+  const fallbackToken = process.env.META_WEBHOOK_VERIFY_TOKEN || globalToken || process.env.VERIFY_TOKEN;
+  return token === fallbackToken;
+}
+
+async function getTenantByChannel(platform, externalId) {
+  const cached = channelCache.get(platform, externalId);
+  if (cached) return cached;
+
+  const channel = await TenantChannel.findOne({ platform, externalId, deleted_at: null });
+  if (channel) {
+    const data = {
+      tenant_id: channel.tenant_id,
+      verifyToken: channel.verifyToken,
+      accessToken: channel.accessToken,
+    };
+    channelCache.set(platform, externalId, data);
+    return data;
+  }
+  return null;
+}
 
 const { generateReply } = require("./gemini");
 const { sendMessage, sendTyping, getUserProfile, downloadExternalMedia } = require("./messenger");
@@ -260,12 +303,11 @@ app.delete("/api/admin/integrations/:id", authenticateAdmin, async (req, res) =>
 });
 
 // ─── WEBHOOKS ─────────────────────────────────────────────
-app.get("/webhook/messenger", (req, res) => {
-   const mode = req.query["hub.mode"];
-   const token = req.query["hub.verify_token"];
+app.get("/webhook/messenger", async (req, res) => {
    const challenge = req.query["hub.challenge"];
    const expectedToken = process.env.MESSENGER_VERIFY_TOKEN || process.env.VERIFY_TOKEN;
-   if (mode === "subscribe" && token === expectedToken) {
+   const isValid = await verifyWebhookToken(req, "messenger", expectedToken);
+   if (isValid) {
      console.log(" Messenger Webhook verified!");
      res.status(200).send(challenge);
    } else { res.sendStatus(403); }
@@ -294,6 +336,14 @@ app.post("/webhook/messenger", async (req, res) => {
     const pageId = entry.id;
     for (const event of entry.messaging || []) {
       try {
+        const externalId = event.recipient?.id || pageId;
+        const channelInfo = await getTenantByChannel("messenger", externalId);
+        if (!channelInfo || !channelInfo.tenant_id) {
+          console.warn(` [Webhook] Warning: Unmapped Messenger pageId ${externalId}`);
+          continue;
+        }
+        const tenant_id = channelInfo.tenant_id;
+
         const mid = event.message?.mid;
         const senderId = event.sender?.id;
         const text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload || "";
@@ -312,18 +362,19 @@ app.post("/webhook/messenger", async (req, res) => {
           continue;
         }
 
-        await handleMessengerEvent(event, pageId);
+        await runWithTenantContext({ tenant_id, role: "admin" }, async () => {
+          await handleMessengerEvent(event, pageId, tenant_id);
+        });
       } catch (err) { console.error(" Messenger Error:", err.message); }
     }
   }
 });
 
-app.get("/webhook/whatsapp", (req, res) => {
-   const mode = req.query["hub.mode"];
-   const token = req.query["hub.verify_token"];
+app.get("/webhook/whatsapp", async (req, res) => {
    const challenge = req.query["hub.challenge"];
    const expectedToken = process.env.WHATSAPP_VERIFY_TOKEN || process.env.VERIFY_TOKEN;
-   if (mode === "subscribe" && token === expectedToken) {
+   const isValid = await verifyWebhookToken(req, "whatsapp", expectedToken);
+   if (isValid) {
      console.log(" WhatsApp Webhook verified!");
      res.status(200).send(challenge);
    } else { res.sendStatus(403); }
@@ -351,6 +402,14 @@ app.post("/webhook/whatsapp", async (req, res) => {
       const wabaId = entry.id;
       for (const change of entry.changes || []) {
         if (change.value && change.value.messages) {
+          const phone_number_id = change.value.metadata?.phone_number_id || wabaId;
+          const channelInfo = await getTenantByChannel("whatsapp", phone_number_id);
+          if (!channelInfo || !channelInfo.tenant_id) {
+            console.warn(` [Webhook] Warning: Unmapped WhatsApp phone_number_id ${phone_number_id}`);
+            continue;
+          }
+          const tenant_id = channelInfo.tenant_id;
+
           const contact = (change.value.contacts && change.value.contacts[0]) ? change.value.contacts[0] : null;
           for (const message of change.value.messages) {
             try {
@@ -365,7 +424,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
                 }
               }
 
-              await handleWhatsAppEvent(message, contact, wabaId);
+              await runWithTenantContext({ tenant_id, role: "admin" }, async () => {
+                await handleWhatsAppEvent(message, contact, phone_number_id, tenant_id);
+              });
             } catch (err) { console.error(" WhatsApp Error:", err.message); }
           }
         }
@@ -374,12 +435,11 @@ app.post("/webhook/whatsapp", async (req, res) => {
   } else { res.sendStatus(404); }
 });
 
-app.get("/webhook/instagram", (req, res) => {
-   const mode = req.query["hub.mode"];
-   const token = req.query["hub.verify_token"];
+app.get("/webhook/instagram", async (req, res) => {
    const challenge = req.query["hub.challenge"];
    const expectedToken = process.env.INSTAGRAM_VERIFY_TOKEN || process.env.VERIFY_TOKEN;
-   if (mode === "subscribe" && token === expectedToken) {
+   const isValid = await verifyWebhookToken(req, "instagram", expectedToken);
+   if (isValid) {
      console.log(" Instagram Webhook verified!");
      res.status(200).send(challenge);
    } else { res.sendStatus(403); }
@@ -408,6 +468,14 @@ app.post("/webhook/instagram", async (req, res) => {
     const pageId = entry.id;
     for (const event of entry.messaging || []) {
       try {
+        const externalId = event.recipient?.id || pageId;
+        const channelInfo = await getTenantByChannel("instagram", externalId);
+        if (!channelInfo || !channelInfo.tenant_id) {
+          console.warn(` [Webhook] Warning: Unmapped Instagram pageId ${externalId}`);
+          continue;
+        }
+        const tenant_id = channelInfo.tenant_id;
+
         const mid = event.message?.mid || event.mid;
         const senderId = event.sender?.id;
         const text = event.message?.text || event.postback?.payload || event.message?.quick_reply?.payload || "";
@@ -426,7 +494,9 @@ app.post("/webhook/instagram", async (req, res) => {
           continue;
         }
 
-        await handleInstagramEvent(event, pageId);
+        await runWithTenantContext({ tenant_id, role: "admin" }, async () => {
+          await handleInstagramEvent(event, pageId, tenant_id);
+        });
       } catch (err) { console.error(" Instagram Error:", err.message); }
     }
   }
@@ -675,7 +745,7 @@ app.post("/api/chat", chatLimiter, async (req, res) => {
 });
 
 // ─── MESSENGER HANDLER ────────────────────────────────────
-async function handleMessengerEvent(event, pageId) {
+async function handleMessengerEvent(event, pageId, tenant_id) {
   try {
     const senderId = event.sender?.id;
     if (!senderId || event.message?.is_echo) return;
@@ -746,7 +816,7 @@ async function handleMessengerEvent(event, pageId) {
 
     await sendTyping(senderId, pageId);
     let reply;
-    try { reply = await generateReply(senderId, text, mediaData, displayName, adContext); }
+    try { reply = await generateReply(senderId, text, mediaData, displayName, adContext, tenant_id); }
     catch (aiErr) { console.error(" AI Error:", aiErr.message); reply = "Thank you for your message! We'll get back to you shortly."; }
     await saveMessage(senderId, "model", reply);
     await sendMessage(senderId, reply, pageId);
@@ -772,7 +842,7 @@ async function handleMessengerEvent(event, pageId) {
 }
 
 // ─── WHATSAPP HANDLER ─────────────────────────────────────
-async function handleWhatsAppEvent(message, contact, wabaId) {
+async function handleWhatsAppEvent(message, contact, wabaId, tenant_id) {
   try {
     const from = message.from;
     const messageId = message.id;
@@ -823,7 +893,7 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
       }
     }
 
-    const reply = await generateReply(from, text, mediaData, displayName);
+    const reply = await generateReply(from, text, mediaData, displayName, null, tenant_id);
     await saveMessage(from, "model", reply, null, "whatsapp");
     await sendWhatsAppMessage(from, reply, wabaId);
     io.emit("new_message", { uid: from, role: "model", content: reply, timestamp: new Date() });
@@ -848,7 +918,7 @@ async function handleWhatsAppEvent(message, contact, wabaId) {
 }
 
 // ─── INSTAGRAM HANDLER ────────────────────────────────────
-async function handleInstagramEvent(event, pageId) {
+async function handleInstagramEvent(event, pageId, tenant_id) {
   try {
     const senderId = event.sender?.id;
     if (!senderId || event.message?.is_echo) return;
@@ -913,7 +983,7 @@ async function handleInstagramEvent(event, pageId) {
 
     await sendInstagramTyping(senderId, pageId);
     let reply;
-    try { reply = await generateReply(senderId, text, mediaData, displayName, adContext); }
+    try { reply = await generateReply(senderId, text, mediaData, displayName, adContext, tenant_id); }
     catch (aiErr) { console.error(" AI Error:", aiErr.message); reply = "Thank you for your message! We'll get back to you shortly."; }
     await saveMessage(senderId, "model", reply, null, "instagram");
     await sendInstagramMessage(senderId, reply, pageId);
