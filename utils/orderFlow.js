@@ -164,7 +164,7 @@ async function createOrder(uid, orderData) {
  * Process user message through order flow
  * Returns: { response, flowCompleted }
  */
-async function processOrderFlow(uid, userMessage, userName) {
+async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
   const session = await OrderSession.findOne({ uid });
   const flow = session ? { state: session.state, data: { selectedProduct: session.selectedProduct, quantity: session.quantity, deliveryAddress: session.deliveryAddress, phone: session.phone, customerPhone: session.phone } } : { state: FLOW_STATE.IDLE, data: {} };
   const { state, data } = flow;

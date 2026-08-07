@@ -1,3 +1,36 @@
+# Dependencies
 node_modules/
+
+# Environment Variables
 .env
+.env.local
+.env.*.local
+
+# Logs
+logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local Databases and State Stores
+data/
+*.db
+*.sqlite
+
+# Next.js Build Artifacts
+.next/
+dashboard-new/.next/
+dashboard-new/out/
+build/
+dist/
+
+# Leftovers and temporary backups
+*.old
+*.bak
+*.tmp
+*.temp
+
+# OS-specific files
+.DS_Store
+Thumbs.db

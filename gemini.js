@@ -325,9 +325,9 @@ async function callAI(messages, mediaData = null) {
 }
 
 // ─── Main entry point ─────────────────────────────────────
-async function generateReply(senderId, userMessage, mediaData = null, userName = "Customer", adContext = null) {
+async function generateReply(senderId, userMessage, mediaData = null, userName = "Customer", adContext = null, tenant_id = null) {
   try {
-    const orderFlowResult = await processOrderFlow(senderId, userMessage, userName);
+    const orderFlowResult = await processOrderFlow(senderId, userMessage, userName, tenant_id);
 
     if (orderFlowResult) {
       return orderFlowResult.response;

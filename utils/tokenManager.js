@@ -2,33 +2,64 @@
  * utils/tokenManager.js
  * ─────────────────────────────────────────────────────────────
  * Unified token management for Messenger, WhatsApp, and Instagram.
- * Handles token retrieval from Integration, Settings, or Environment.
- * Includes token revocation detection for expired/invalid tokens.
+ * Handles multi-tier token lookup with caching and fallback.
  * ─────────────────────────────────────────────────────────────
  */
 
-const { Settings, Integration } = require("../db");
+const { Settings, Integration, TenantChannel } = require("../db");
 const { decrypt } = require("../security");
+const channelCache = require("./channelCache");
 
+/**
+ * Resolve Access Token using Multi-Tier Lookup Order:
+ * 1. tenant_channels table (lookup by platform & externalId, using channelCache)
+ * 2. Fallback to integrations table
+ * 3. Fallback to settings table
+ * 4. Fallback to environment variables
+ */
 async function getAccessToken(platform, externalId = null) {
   try {
     if (externalId) {
+      // Tier 1: tenant_channels table
+      let channelInfo = channelCache.get(platform, externalId);
+      if (!channelInfo) {
+        const channel = await TenantChannel.findOne({ platform, externalId, deleted_at: null });
+        if (channel) {
+          channelInfo = {
+            tenant_id: channel.tenant_id,
+            verifyToken: channel.verifyToken,
+            accessToken: channel.accessToken,
+          };
+          channelCache.set(platform, externalId, channelInfo);
+        }
+      }
+
+      if (channelInfo && channelInfo.accessToken) {
+        const token = decrypt(channelInfo.accessToken);
+        if (token) {
+          console.log(` [TokenManager] Using tenant_channels token for ${platform} (${externalId})`);
+          return token;
+        }
+      }
+
+      // Tier 2: integrations table
       const typeMap = { messenger: 'facebook', whatsapp: 'whatsapp', instagram: 'instagram' };
       const integration = await Integration.findOne({ externalId, type: typeMap[platform] || platform });
       if (integration && integration.accessToken) {
         // Skip revoked integrations
         if (integration.revokedAt) {
-          console.warn(` [TokenManager] Skipping revoked token for ${platform} (${externalId})`);
-          return null;
-        }
-        const token = decrypt(integration.accessToken);
-        if (token) {
-          console.log(` [TokenManager] Using integration token for ${platform}`);
-          return token;
+          console.warn(` [TokenManager] Skipping revoked integration token for ${platform} (${externalId})`);
+        } else {
+          const token = decrypt(integration.accessToken);
+          if (token) {
+            console.log(` [TokenManager] Using integration token for ${platform} (${externalId})`);
+            return token;
+          }
         }
       }
     }
 
+    // Tier 3: settings table
     const settings = await Settings.findOne({ configId: "global" });
     if (settings) {
       const settingsKeyMap = { messenger: 'messengerApiKey', whatsapp: 'whatsappApiKey', instagram: 'instagramApiKey' };
@@ -39,6 +70,7 @@ async function getAccessToken(platform, externalId = null) {
       }
     }
 
+    // Tier 4: environment variables
     const envKeyMap = { messenger: 'PAGE_ACCESS_TOKEN', whatsapp: 'WHATSAPP_TOKEN', instagram: 'INSTAGRAM_TOKEN' };
     const envKey = envKeyMap[platform];
     const envToken = process.env[envKey];
