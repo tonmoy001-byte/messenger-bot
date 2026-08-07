@@ -28,6 +28,8 @@ const {
   ConversationAnalytics,
   Ad,
   AdClick,
+  Tenant,
+  TenantChannel,
 } = require("./supabaseClient");
 
 /**
@@ -65,4 +67,6 @@ module.exports = {
   ConversationAnalytics,
   Ad,
   AdClick,
+  Tenant,
+  TenantChannel,
 };

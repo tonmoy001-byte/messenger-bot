@@ -1,12 +1,13 @@
 /**
  * supabaseClient.js
  * ─────────────────────────────────────────────────────────────
- * Supabase client + Mongoose-like query wrapper.
+ * Supabase client + Mongoose-like query wrapper with multi-tenant scoping and soft delete.
  * Drop-in replacement for Mongoose models with minimal code changes.
  * ─────────────────────────────────────────────────────────────
  */
 
 const { createClient } = require("@supabase/supabase-js");
+const { getTenantContext } = require("./utils/tenantContext");
 require("dotenv").config();
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -20,6 +21,17 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: { persistSession: false }
 });
+
+const MULTI_TENANT_TABLES = [
+  "admins",
+  "users",
+  "products",
+  "orders",
+  "knowledge_base",
+  "messages",
+  "integrations",
+  "tenant_channels"
+];
 
 /**
  * Convert value to ISO string if it's a Date object.
@@ -41,10 +53,34 @@ function toPostgrestColumn(key) {
   return parts[0] + parts.slice(1, -1).map(p => `->${p}`).join("") + `->>${parts[parts.length - 1]}`;
 }
 
-function applyFilter(query, filter) {
+function applyFilter(query, filter, tableName) {
+  // Apply tenant scoping & soft-delete filtering first
+  const ctx = getTenantContext();
+  if (ctx && ctx.tenant_id) {
+    if (tableName === "tenants") {
+      query = query.eq("id", ctx.tenant_id).is("deleted_at", null);
+    } else if (MULTI_TENANT_TABLES.includes(tableName)) {
+      query = query.eq("tenant_id", ctx.tenant_id).is("deleted_at", null);
+    }
+  } else {
+    // If no context exists but it's not a superadmin, filter out soft-deleted records by default
+    if (!ctx || !ctx.isSuperAdmin) {
+      if (tableName === "tenants") {
+        query = query.is("deleted_at", null);
+      } else if (MULTI_TENANT_TABLES.includes(tableName)) {
+        query = query.is("deleted_at", null);
+      }
+    }
+  }
+
   if (!filter) return query;
 
   for (const [key, value] of Object.entries(filter)) {
+    // Avoid duplicating tenant_id/deleted_at conditions if already handled
+    if (ctx && ctx.tenant_id) {
+      if (key === "tenant_id" || key === "deleted_at") continue;
+    }
+
     const col = toPostgrestColumn(key);
     if (key === "$or") {
       // Supabase doesn't support OR natively in chain; use .or()
@@ -165,9 +201,22 @@ class Model {
     const { upsert = false, new: returnNew = true } = options;
     const updateData = buildUpdateData(update);
 
+    // Enforce tenant scoping cascade when soft-deleting a tenant
+    if (this.tableName === "tenants" && update.$set && update.$set.deleted_at) {
+      const tenantId = filter.id || filter.tenant_id;
+      if (tenantId) {
+        for (const childTable of MULTI_TENANT_TABLES) {
+          await this.client
+            .from(childTable)
+            .update({ deleted_at: update.$set.deleted_at })
+            .eq("tenant_id", tenantId);
+        }
+      }
+    }
+
     // First, try to find existing record
     let query = this.client.from(this.tableName).select("*").limit(1);
-    query = applyFilter(query, filter);
+    query = applyFilter(query, filter, this.tableName);
     const { data: existing } = await query.maybeSingle();
 
     if (existing) {
@@ -212,6 +261,13 @@ class Model {
           insertPayload[k] = v;
         }
       }
+
+      // Automatically inject tenant_id on insertion
+      const ctx = getTenantContext();
+      if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+        insertPayload.tenant_id = ctx.tenant_id;
+      }
+
       const { data: inserted, error } = await this.client.from(this.tableName).insert(insertPayload).select().single();
       if (error) throw error;
       return this._wrapDoc(inserted);
@@ -228,37 +284,68 @@ class Model {
     const { _increments, ...setFields } = updateData;
     const { new: returnNew = true } = options;
 
-    const { error } = await this.client.from(this.tableName).update(setFields).eq("id", id);
+    const ctx = getTenantContext();
+    let query = this.client.from(this.tableName).update(setFields).eq("id", id);
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      query = query.eq("tenant_id", ctx.tenant_id).is("deleted_at", null);
+    }
+
+    const { error } = await query;
     if (error) throw error;
 
     if (_increments) {
       for (const [field, amount] of Object.entries(_increments)) {
-        const { data: current } = await this.client.from(this.tableName).select(field).eq("id", id).single();
+        let currentQuery = this.client.from(this.tableName).select(field).eq("id", id);
+        if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+          currentQuery = currentQuery.eq("tenant_id", ctx.tenant_id);
+        }
+        const { data: current } = await currentQuery.single();
         const newVal = (current?.[field] || 0) + amount;
         await this.client.from(this.tableName).update({ [field]: newVal }).eq("id", id);
       }
     }
 
     if (returnNew) {
-      const { data } = await this.client.from(this.tableName).select("*").eq("id", id).single();
+      let getQuery = this.client.from(this.tableName).select("*").eq("id", id);
+      if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+        getQuery = getQuery.eq("tenant_id", ctx.tenant_id);
+      }
+      const { data } = await getQuery.single();
       return this._wrapDoc(data);
     }
     return null;
   }
 
   /**
-   * findByIdAndDelete(id)
+   * findByIdAndDelete(id) -> Maps to Soft Delete
    */
   async findByIdAndDelete(id) {
-    const { data, error } = await this.client.from(this.tableName).delete().eq("id", id).select().single();
-    if (error) throw error;
-    return data;
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      const { data, error } = await this.client
+        .from(this.tableName)
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("tenant_id", ctx.tenant_id)
+        .select()
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    } else {
+      const { data, error } = await this.client.from(this.tableName).delete().eq("id", id).select().maybeSingle();
+      if (error) throw error;
+      return data;
+    }
   }
 
   /**
    * new Model({ ... }).save()
    */
   async save(doc) {
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      doc.tenant_id = ctx.tenant_id;
+    }
     const { data, error } = await this.client.from(this.tableName).insert(doc).select().single();
     if (error) throw error;
     return this._wrapDoc(data);
@@ -268,6 +355,12 @@ class Model {
    * insertMany([ { ... }, { ... } ])
    */
   async insertMany(docs) {
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      for (const doc of docs) {
+        doc.tenant_id = ctx.tenant_id;
+      }
+    }
     const { data, error } = await this.client.from(this.tableName).insert(docs).select();
     if (error) throw error;
     return (data || []).map(d => this._wrapDoc(d));
@@ -280,7 +373,7 @@ class Model {
     // Handle $inc via read-modify-write (Supabase doesn't support atomic increment natively)
     if (update.$inc) {
       let readQuery = this.client.from(this.tableName).select("*").limit(1);
-      readQuery = applyFilter(readQuery, filter);
+      readQuery = applyFilter(readQuery, filter, this.tableName);
       const { data: existing } = await readQuery.maybeSingle();
       if (!existing) return { modifiedCount: 0, data: null };
 
@@ -302,19 +395,7 @@ class Model {
     }
 
     let query = this.client.from(this.tableName).update(buildUpdateData(update));
-    query = applyFilter(query, filter);
-    const { data, error } = await query.select().single();
-    if (error) throw error;
-    return { modifiedCount: 1, data };
-  }
-
-  /**
-   * updateOne(filter, update)
-   * Supports $set, $setOnInsert, $inc
-   */
-  async updateOne(filter, update) {
-    let query = this.client.from(this.tableName).update(buildUpdateData(update));
-    query = applyFilter(query, filter);
+    query = applyFilter(query, filter, this.tableName);
     const { data, error } = await query.select().single();
     if (error) throw error;
     return { modifiedCount: 1, data };
@@ -326,7 +407,7 @@ class Model {
   async updateMany(filter, update) {
     // Fetch matching rows, then update each (Supabase doesn't support bulk update with filter)
     let readQuery = this.client.from(this.tableName).select("id");
-    readQuery = applyFilter(readQuery, filter);
+    readQuery = applyFilter(readQuery, filter, this.tableName);
     const { data: rows, error: readErr } = await readQuery;
     if (readErr) throw readErr;
     if (!rows || rows.length === 0) return { modifiedCount: 0 };
@@ -349,14 +430,14 @@ class Model {
   async countDocuments(filter = {}) {
     try {
       let query = this.client.from(this.tableName).select("*", { count: "exact", head: true });
-      query = applyFilter(query, filter);
+      query = applyFilter(query, filter, this.tableName);
       const { count, error } = await query;
       if (error) throw error;
       return count || 0;
     } catch (e) {
       // Fallback: fetch all and count in JS
       let query = this.client.from(this.tableName).select("id");
-      query = applyFilter(query, filter);
+      query = applyFilter(query, filter, this.tableName);
       const { data, error } = await query;
       if (error) throw error;
       return (data || []).length;
@@ -364,34 +445,69 @@ class Model {
   }
 
   /**
-   * deleteOne(filter) - Delete first matching record
+   * deleteOne(filter) - Maps to Soft Delete
    */
   async deleteOne(filter = {}) {
-    let query = this.client.from(this.tableName).select("id").limit(1);
-    query = applyFilter(query, filter);
-    const { data: existing } = await query.maybeSingle();
-    if (!existing) return { deletedCount: 0 };
-    const { error } = await this.client.from(this.tableName).delete().eq("id", existing.id);
-    if (error) throw error;
-    return { deletedCount: 1 };
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      let query = this.client.from(this.tableName).select("id").limit(1);
+      query = applyFilter(query, filter, this.tableName);
+      const { data: existing } = await query.maybeSingle();
+      if (!existing) return { deletedCount: 0 };
+      const { error } = await this.client
+        .from(this.tableName)
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("id", existing.id)
+        .eq("tenant_id", ctx.tenant_id);
+      if (error) throw error;
+      return { deletedCount: 1 };
+    } else {
+      let query = this.client.from(this.tableName).select("id").limit(1);
+      query = applyFilter(query, filter, this.tableName);
+      const { data: existing } = await query.maybeSingle();
+      if (!existing) return { deletedCount: 0 };
+      const { error } = await this.client.from(this.tableName).delete().eq("id", existing.id);
+      if (error) throw error;
+      return { deletedCount: 1 };
+    }
   }
 
   /**
-   * deleteMany(filter) - Delete all matching records
+   * deleteMany(filter) - Maps to Soft Delete
    */
   async deleteMany(filter = {}) {
-    let query = this.client.from(this.tableName).select("id");
-    query = applyFilter(query, filter);
-    const { data: rows, error: readErr } = await query;
-    if (readErr) throw readErr;
-    if (!rows || rows.length === 0) return { deletedCount: 0 };
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
+      let query = this.client.from(this.tableName).select("id");
+      query = applyFilter(query, filter, this.tableName);
+      const { data: rows, error: readErr } = await query;
+      if (readErr) throw readErr;
+      if (!rows || rows.length === 0) return { deletedCount: 0 };
 
-    let deletedCount = 0;
-    for (const row of rows) {
-      const { error } = await this.client.from(this.tableName).delete().eq("id", row.id);
-      if (!error) deletedCount++;
+      let deletedCount = 0;
+      for (const row of rows) {
+        const { error } = await this.client
+          .from(this.tableName)
+          .update({ deleted_at: new Date().toISOString() })
+          .eq("id", row.id)
+          .eq("tenant_id", ctx.tenant_id);
+        if (!error) deletedCount++;
+      }
+      return { deletedCount };
+    } else {
+      let query = this.client.from(this.tableName).select("id");
+      query = applyFilter(query, filter, this.tableName);
+      const { data: rows, error: readErr } = await query;
+      if (readErr) throw readErr;
+      if (!rows || rows.length === 0) return { deletedCount: 0 };
+
+      let deletedCount = 0;
+      for (const row of rows) {
+        const { error } = await this.client.from(this.tableName).delete().eq("id", row.id);
+        if (!error) deletedCount++;
+      }
+      return { deletedCount };
     }
-    return { deletedCount };
   }
 
   /**
@@ -406,7 +522,7 @@ class Model {
    */
   async distinct(field, filter = {}) {
     let query = this.client.from(this.tableName).select(field);
-    query = applyFilter(query, filter);
+    query = applyFilter(query, filter, this.tableName);
     const { data, error } = await query;
     if (error) throw error;
     const values = (data || []).map(row => row[field]);
@@ -430,7 +546,7 @@ class Model {
 
     // Fetch all matching rows
     let query = this.client.from(this.tableName).select("*");
-    query = applyFilter(query, matchFilter);
+    query = applyFilter(query, matchFilter, this.tableName);
     const { data, error } = await query;
     if (error) throw error;
 
@@ -626,7 +742,7 @@ class QueryBuilder {
    */
   async then(resolve) {
     let query = this.client.from(this.tableName).select(this._selectFields);
-    query = applyFilter(query, this.filter);
+    query = applyFilter(query, this.filter, this.tableName);
 
     if (this._sortField) {
       query = query.order(this._sortField, { ascending: this._sortAsc });
@@ -688,7 +804,7 @@ class FindOneQuery {
 
   async then(resolve) {
     let query = this.client.from(this.tableName).select("*").limit(1);
-    query = applyFilter(query, this.filter);
+    query = applyFilter(query, this.filter, this.tableName);
     if (this._sortField) {
       query = query.order(this._sortField, { ascending: this._sortAsc });
     }
@@ -716,6 +832,8 @@ const Feedback = new Model("feedback");
 const ConversationAnalytics = new Model("conversation_analytics");
 const Ad = new Model("ads");
 const AdClick = new Model("ad_clicks");
+const Tenant = new Model("tenants");
+const TenantChannel = new Model("tenant_channels");
 
 module.exports = {
   supabase,
@@ -737,4 +855,6 @@ module.exports = {
   ConversationAnalytics,
   Ad,
   AdClick,
+  Tenant,
+  TenantChannel,
 };
