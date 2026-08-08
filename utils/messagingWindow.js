@@ -6,8 +6,8 @@
  * ─────────────────────────────────────────────────────────────
  */
 
-const { Message, Settings } = require("../db");
-const { sendWhatsAppMessage } = require("../whatsapp");
+const { Message, Settings } = require("../src/config/db");
+const { sendWhatsAppMessage } = require("../src/services/channels/whatsapp");
 
 /**
  * Check if a conversation is within the 24-hour customer-initiated window.

@@ -9,7 +9,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
 const jwt = require("jsonwebtoken");
-const { supabase, Product, Order, KnowledgeBase, Tenant, Admin } = require("../supabaseClient");
+const { supabase, Product, Order, KnowledgeBase, Tenant, Admin } = require("../src/config/supabaseClient");
 const { runWithTenantContext } = require("../utils/tenantContext");
 
 const JWT_SECRET = process.env.JWT_SECRET || "cyberbot-admin-secret-key-change-in-production";

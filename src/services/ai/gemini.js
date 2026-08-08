@@ -8,11 +8,11 @@
  */
 
 require("dotenv").config();
-const { Message, KnowledgeBase, Settings } = require("./db");
-const { processOrderFlow, getProducts } = require("./utils/orderFlow");
-const { getProductsForAI } = require("./utils/seedProducts");
-const { retrieveContext, buildRAGPrompt } = require("./utils/rag");
-const { withRetry } = require("./utils/retry");
+const { Message, KnowledgeBase, Settings } = require("../../config/db");
+const { processOrderFlow, getProducts } = require("../../../utils/orderFlow");
+const { getProductsForAI } = require("../../../utils/seedProducts");
+const { retrieveContext, buildRAGPrompt } = require("../../../utils/rag");
+const { withRetry } = require("../../../utils/retry");
 
 const MAX_HISTORY_TURNS = 10;
 
@@ -333,7 +333,7 @@ async function generateReply(senderId, userMessage, mediaData = null, userName =
       return orderFlowResult.response;
     }
 
-    const { Settings } = require("./db");
+    const { Settings } = require("../../config/db");
     let settings = await Settings.findOne({ configId: "global" });
     if (!settings) settings = { businessName: "Your Business", timezone: "UTC" };
 

@@ -7,7 +7,7 @@
  */
 
 const axios = require("axios");
-const { OrderSession, EcommerceConnection, Order } = require("../db");
+const { OrderSession, EcommerceConnection, Order } = require("../src/config/db");
 const { createShopifyOrder } = require("./shopify");
 const { createWooOrder, updateWooStock } = require("./woocommerce");
 

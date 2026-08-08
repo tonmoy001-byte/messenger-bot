@@ -7,7 +7,7 @@
  */
 
 const { createClient } = require("@supabase/supabase-js");
-const { getTenantContext } = require("./utils/tenantContext");
+const { getTenantContext } = require("../../utils/tenantContext");
 require("dotenv").config();
 
 const supabaseUrl = process.env.SUPABASE_URL;

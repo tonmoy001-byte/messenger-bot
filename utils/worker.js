@@ -7,11 +7,11 @@
  * ─────────────────────────────────────────────────────────────
  */
 
-const { generateReply } = require("../gemini");
+const { generateReply } = require("../src/services/ai/gemini");
 const { sendMessage: sendMessenger, sendTyping } = require("../messenger");
-const { sendWhatsAppMessage, markWhatsAppAsRead } = require("../whatsapp");
+const { sendWhatsAppMessage, markWhatsAppAsRead } = require("../src/services/channels/whatsapp");
 const { sendInstagramMessage, sendInstagramTyping } = require("../instagram");
-const { saveMessage } = require("../db");
+const { saveMessage } = require("../src/config/db");
 const { isWithinMessagingWindow, sendViaTagIfExpired } = require("./messagingWindow");
 
 let workerAvailable = false;

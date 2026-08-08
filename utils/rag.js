@@ -9,7 +9,7 @@
 
 const { generateEmbedding } = require("./embeddings");
 const { queryVectors, upsertVectors, deleteVectors } = require("./vectorDB");
-const { KnowledgeBase } = require("../db");
+const { KnowledgeBase } = require("../src/config/db");
 const { formatVectorContext, formatKeywordContext } = require("./ragFormat");
 
 /**
@@ -126,7 +126,7 @@ async function indexProduct(product) {
  */
 async function indexAllProducts() {
   try {
-    const { Product } = require("../db");
+    const { Product } = require("../src/config/db");
     const products = await Product.find({ isActive: true });
 
     let indexed = 0;

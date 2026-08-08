@@ -1,4 +1,4 @@
-const { Ad, AdClick, User } = require("../db");
+const { Ad, AdClick, User } = require("../src/config/db");
 
 /**
  * Extract ad context from Facebook/Instagram referral parameters.
@@ -108,7 +108,7 @@ async function markAdConversion(uid, orderId) {
     );
     
     // Update Ad stats
-    const order = require("../db").Order;
+    const order = require("../src/config/db").Order;
     const orderDoc = await order.findById(orderId);
     
     await Ad.updateOne(

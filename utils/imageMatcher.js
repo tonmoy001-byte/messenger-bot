@@ -6,7 +6,7 @@
  * ────────────────────────────────────────────────────────────
  */
 
-const { Product } = require("../db");
+const { Product } = require("../src/config/db");
 
 /**
  * Match detected items from an image to products in the catalog.

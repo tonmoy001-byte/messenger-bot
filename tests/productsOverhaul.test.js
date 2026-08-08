@@ -8,10 +8,10 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { Product, Order } = require("../supabaseClient");
+const { Product, Order } = require("../src/config/supabaseClient");
 const { processOrderFlow } = require("../utils/orderFlow");
 const { runWithTenantContext } = require("../utils/tenantContext");
-const supabaseModels = require("../supabaseClient");
+const supabaseModels = require("../src/config/supabaseClient");
 
 // Capture object for Supabase queries
 let lastQuery = null;
@@ -103,7 +103,7 @@ test("Order processing does NOT decrement stock for service or course items", as
   };
 
   // Mock WooCommerce WooCommerce Connection
-  const { EcommerceConnection } = require("../supabaseClient");
+  const { EcommerceConnection } = require("../src/config/supabaseClient");
 
   // Set the mock WooCommerce Connection
   myMockClient.mockData = {

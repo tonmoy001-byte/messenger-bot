@@ -6,8 +6,8 @@
  * ─────────────────────────────────────────────────────────────
  */
 
-const { Settings, Integration, TenantChannel } = require("../db");
-const { decrypt } = require("../security");
+const { Settings, Integration, TenantChannel } = require("../src/config/db");
+const { decrypt } = require("../src/utils/security");
 const channelCache = require("./channelCache");
 
 /**

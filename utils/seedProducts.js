@@ -6,7 +6,7 @@
  * ─────────────────────────────────────────────────────────────
  */
 
-const { Product } = require("../db");
+const { Product } = require("../src/config/db");
 
 const SAMPLE_PRODUCTS = [
   {
@@ -187,7 +187,7 @@ async function seedProducts() {
  */
 async function getProductsForAI() {
   try {
-    const { data: dbProducts, error } = await require("../supabaseClient").supabase
+    const { data: dbProducts, error } = await require("../src/config/supabaseClient").supabase
       .from("products")
       .select("name, price, category, description")
       .eq("isActive", true)

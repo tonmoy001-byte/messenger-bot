@@ -7,7 +7,7 @@
  */
 
 const axios = require("axios");
-const { Template, Settings } = require("../db");
+const { Template, Settings } = require("../src/config/db");
 const { resolveToken } = require("./tokenManager");
 
 const WHATSAPP_API_BASE = "https://graph.facebook.com/v19.0";

@@ -6,8 +6,8 @@
  * ─────────────────────────────────────────────────────────────
  */
 
-const { Message } = require("../db");
-const { supabase } = require("../supabaseClient");
+const { Message } = require("../src/config/db");
+const { supabase } = require("../src/config/supabaseClient");
 
 const DEFAULT_RETENTION_DAYS = 30;
 
