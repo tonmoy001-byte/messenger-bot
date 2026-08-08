@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { app, server, io, startServer } = require("./index");
+const { app, server, io, startServer } = require("../index");
 const next = require("next");
 const { parse } = require("url");
 
@@ -7,7 +7,7 @@ const dev = process.env.NODE_ENV !== "production";
 const port = process.env.PORT || 3000;
 const hostname = "localhost";
 
-const nextApp = next({ dev, hostname, port, dir: "./dashboard-new" });
+const nextApp = next({ dev, hostname, port, dir: "./dashboard" });
 const handle = nextApp.getRequestHandler();
 
 async function main() {

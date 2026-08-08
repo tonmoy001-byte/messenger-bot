@@ -10,8 +10,8 @@ const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
 const next = require("next");
-const { encrypt, decrypt } = require("./security");
-const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./db");
+const { encrypt, decrypt } = require("./src/utils/security");
+const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./src/config/db");
 
 const { runWithTenantContext } = require("./utils/tenantContext");
 const channelCache = require("./utils/channelCache");
@@ -56,9 +56,9 @@ async function getTenantByChannel(platform, externalId) {
   return null;
 }
 
-const { generateReply } = require("./gemini");
+const { generateReply } = require("./src/services/ai/gemini");
 const { sendMessage, sendTyping, getUserProfile, downloadExternalMedia } = require("./messenger");
-const { sendWhatsAppMessage, markWhatsAppAsRead, downloadWhatsAppMedia, isWithin24HourWindow } = require("./whatsapp");
+const { sendWhatsAppMessage, markWhatsAppAsRead, downloadWhatsAppMedia, isWithin24HourWindow } = require("./src/services/channels/whatsapp");
 const { sendInstagramMessage, sendInstagramTyping, downloadInstagramMedia, getInstagramUserProfile } = require("./instagram");
 const { createBkashPayment, executeBkashPayment, createNagadPayment, markCOD } = require("./utils/payments");
 const { matchProducts, buildMatchResponse } = require("./utils/imageMatcher");
@@ -84,7 +84,7 @@ const { buildOrderKey } = require("./utils/orderIdempotency");
 const recentOrders = new Map(); // key -> { createdAt, orderId }
 
 const dev = process.env.NODE_ENV !== "production";
-const dashboardDir = path.join(__dirname, "dashboard-new");
+const dashboardDir = path.join(__dirname, "dashboard");
 const nextApp = next({ dev, dir: dashboardDir });
 const nextHandle = nextApp.getRequestHandler();
 
@@ -117,7 +117,7 @@ app.use((req, res, next) => {
 });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────
-const { authenticateTenant } = require("./middleware/auth");
+const { authenticateTenant } = require("./src/middleware/auth");
 const authenticateAdmin = authenticateTenant;
 
 const requireAdmin = makeRequireRole("admin");

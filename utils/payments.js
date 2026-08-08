@@ -7,7 +7,7 @@
  */
 
 const axios = require("axios");
-const { Payment, Order } = require("../db");
+const { Payment, Order } = require("../src/config/db");
 
 // ─── BKASH INTEGRATION ─────────────────────────────────────
 const BKASH_CONFIG = {

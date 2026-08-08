@@ -9,8 +9,8 @@
 
 require("dotenv").config();
 const axios = require("axios");
-const { getWhatsAppToken: getWhatsAppTokenFromManager } = require("./utils/tokenManager");
-const { withRetry } = require("./utils/retry");
+const { getWhatsAppToken: getWhatsAppTokenFromManager } = require("../../../utils/tokenManager");
+const { withRetry } = require("../../../utils/retry");
 
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -131,7 +131,7 @@ async function downloadWhatsAppMedia(mediaId, wabaId = null) {
  */
 async function isWithin24HourWindow(uid) {
   try {
-    const { Message } = require("./db");
+    const { Message } = require("../../config/db");
     const lastCustomerMessage = await Message.findOne({ uid, role: "user" })
       .sort({ createdAt: -1 });
     

@@ -2,18 +2,18 @@
   "name": "messenger-bot",
   "version": "1.0.0",
   "description": "Multi-Channel AI Chatbot with Order Management",
-  "main": "server.js",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node index.js",
-    "server": "node server.js",
+    "start": "node src/server.js",
+    "server": "node src/server.js",
     "backend": "node index.js",
     "dev": "node index.js",
     "ngrok": "ngrok http 3000",
-    "dev:all": "concurrently -n server,ngrok -c blue,green \"node index.js\" \"ngrok http 3000\"",
+    "dev:all": "concurrently -n server,ngrok -c blue,green \"node src/server.js\" \"ngrok http 3000\"",
     "test": "node --test \"tests/*.test.js\"",
     "test:unit": "node --test tests/rbac.test.js tests/auth.test.js tests/rag.test.js tests/idempotency.test.js tests/escalation.test.js tests/logger.test.js",
-    "build:dashboard": "cd dashboard-new && npm run build",
-    "postinstall": "cd dashboard-new && npm install"
+    "build:dashboard": "cd dashboard && npm run build",
+    "postinstall": "cd dashboard && npm install"
   },
   "dependencies": {
     "@pinecone-database/pinecone": "^7.2.0",

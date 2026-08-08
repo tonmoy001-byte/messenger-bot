@@ -7,7 +7,7 @@
  * ────────────────────────────────────────────────────────────
  */
 
-const { Message, Feedback, Order, User } = require("../db");
+const { Message, Feedback, Order, User } = require("../src/config/db");
 
 /**
  * Analyze conversations for a given date range.

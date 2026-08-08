@@ -10,8 +10,8 @@ const { test } = require("node:test");
 const assert = require("node:assert");
 const channelCache = require("../utils/channelCache");
 const tokenManager = require("../utils/tokenManager");
-const { encrypt } = require("../security");
-const supabaseModels = require("../supabaseClient");
+const { encrypt } = require("../src/utils/security");
+const supabaseModels = require("../src/config/supabaseClient");
 
 // Capture object for Supabase queries
 let lastQuery = null;

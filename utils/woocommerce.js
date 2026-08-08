@@ -8,7 +8,7 @@
 
 const axios = require("axios");
 const crypto = require("crypto");
-const { Product, Order } = require("../db");
+const { Product, Order } = require("../src/config/db");
 
 /**
  * Build WooCommerce API URL.
