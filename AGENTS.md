@@ -10,11 +10,11 @@ Multi-channel AI chatbot SaaS ("Cyberbot") with Messenger, WhatsApp, Instagram, 
 
 ```
 index.js              → Express server (port 3000), all API routes, webhook handlers
-gemini.js             → AI provider abstraction (Groq primary, Gemini fallback)
-supabaseClient.js     → Supabase client + Mongoose-style Model adapters
-messageQueue.js       → Bull queue with exponential dedup, retry, DLQ
-webhookRetry.js       → Webhook retry queue with dead letter queue
-dashboard-new/        → Next.js 16 dashboard (shadcn/ui, Tailwind CSS 4)
+src/services/ai/gemini.js → AI provider abstraction (Groq primary, Gemini fallback)
+src/config/supabaseClient.js → Supabase client + Model adapters
+utils/queue.js        → Bull queue with exponential dedup, retry, DLQ
+utils/retry.js        → Webhook retry queue with dead letter queue
+dashboard/            → Next.js 16 dashboard (shadcn/ui, Tailwind CSS 4)
 ```
 
 ## Code Style

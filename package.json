@@ -5,15 +5,12 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "server": "node src/server.js",
+    "dev": "node src/server.js",
     "backend": "node index.js",
-    "dev": "node index.js",
-    "ngrok": "ngrok http 3000",
-    "dev:all": "concurrently -n server,ngrok -c blue,green \"node src/server.js\" \"ngrok http 3000\"",
-    "test": "node --test \"tests/*.test.js\"",
-    "test:unit": "node --test tests/rbac.test.js tests/auth.test.js tests/rag.test.js tests/idempotency.test.js tests/escalation.test.js tests/logger.test.js",
     "build:dashboard": "cd dashboard && npm run build",
-    "postinstall": "cd dashboard && npm install"
+    "postinstall": "cd dashboard && npm install",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:unit": "node --test tests/rbac.test.js tests/auth.test.js tests/rag.test.js tests/idempotency.test.js tests/escalation.test.js tests/logger.test.js"
   },
   "dependencies": {
     "@pinecone-database/pinecone": "^7.2.0",
@@ -28,7 +25,6 @@
     "ioredis": "^6.0.0",
     "jose": "^6.2.8",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.3.3",
     "next": "^16.2.12",
     "node-cron": "^4.6.0",
     "react": "^19.2.4",
