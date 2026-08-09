@@ -21,11 +21,19 @@ function getShopifyUrl(shopDomain, endpoint) {
  * Verify Shopify webhook HMAC signature.
  */
 function verifyShopifyWebhook(body, hmac, secret) {
+  if (!hmac || !secret) return false;
   const hash = crypto
     .createHmac("sha256", secret)
     .update(body, "utf8")
     .digest("base64");
-  return hash === hmac;
+
+  const hashBuffer = Buffer.from(hash, "utf8");
+  const hmacBuffer = Buffer.from(hmac, "utf8");
+
+  if (hashBuffer.length !== hmacBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(hashBuffer, hmacBuffer);
 }
 
 /**

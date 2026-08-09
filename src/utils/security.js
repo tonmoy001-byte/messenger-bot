@@ -8,12 +8,16 @@
 
 const crypto = require("crypto");
 require("dotenv").config();
+const { requireEnv } = require("../config/env");
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 16;
 const SALT_LENGTH = 64;
 const TAG_LENGTH = 16;
-const KEY = process.env.TOKEN_ENCRYPTION_KEY || "temporary-key-do-not-use-in-production-123";
+const KEY = requireEnv("TOKEN_ENCRYPTION_KEY", {
+  minLength: 32,
+  forbid: ["temporary-key-do-not-use-in-production-123", "your_32_char_encryption_key_here"]
+});
 
 /**
  * Encrypt a string using AES-256-GCM.

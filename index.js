@@ -10,7 +10,7 @@ const axios = require("axios");
 const rateLimit = require("express-rate-limit");
 const path = require("path");
 const next = require("next");
-const { encrypt, decrypt } = require("./src/utils/security");
+const { encrypt, decrypt, verifyMetaSignature } = require("./src/utils/security");
 const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./src/config/db");
 
 const { runWithTenantContext } = require("./utils/tenantContext");
@@ -90,14 +90,43 @@ const nextHandle = nextApp.getRequestHandler();
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()).filter(Boolean)
+  : [];
+
 const io = socketIo(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.length === 0) {
+        if (process.env.NODE_ENV !== "production") {
+          return callback(null, true);
+        }
+        return callback(new Error("CORS: ALLOWED_ORIGINS not configured in production"));
+      }
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("CORS: Origin not allowed"));
+    },
+    methods: ["GET", "POST"],
+    credentials: true
+  },
   pingTimeout: 60000,
   pingInterval: 25000,
   transports: ["websocket", "polling"]
 });
+const { requireEnv, validateEnv } = require("./src/config/env");
+
+// Run global environment variable validation on startup
+validateEnv();
+
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || "cyberbot-admin-secret-key-change-in-production";
+const JWT_SECRET = requireEnv("JWT_SECRET", {
+  minLength: 16,
+  forbid: ["cyberbot-admin-secret-key-change-in-production", "your_jwt_secret_key"]
+});
 
 const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: "Too many requests" }, standardHeaders: true, legacyHeaders: false });
 const chatLimiter = rateLimit({ windowMs: 60 * 1000, max: 10, message: { error: "Rate limit exceeded" } });
@@ -111,8 +140,25 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "landing")));
 
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  const origin = req.headers.origin;
+  if (allowedOrigins.length > 0) {
+    if (allowedOrigins.includes(origin)) {
+      res.header("Access-Control-Allow-Origin", origin);
+    }
+  } else {
+    if (process.env.NODE_ENV !== "production") {
+      res.header("Access-Control-Allow-Origin", origin || "*");
+    } else {
+      console.warn("⚠️ WARNING: ALLOWED_ORIGINS is not set in production! CORS requests will be blocked.");
+    }
+  }
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Tenant-ID");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+  res.header("Access-Control-Allow-Credentials", "true");
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
   next();
 });
 
@@ -136,7 +182,7 @@ async function saveMessage(uid, role, content, mediaUrl = null, platform = "mess
 }
 
 // ─── AUTH ROUTES ──────────────────────────────────────────
-app.post("/api/auth/signup", authLimiter, async (req, res) => {
+app.post("/api/auth/signup", authLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   const { username, password, role, tenant_id } = req.body;
   try {
     if (!username || !password) {
@@ -146,27 +192,26 @@ app.post("/api/auth/signup", authLimiter, async (req, res) => {
     if (existing) {
       return res.status(400).json({ error: "Username already exists" });
     }
+
+    const isSuperAdmin = req.user?.role === "superadmin";
+    const finalRole = isSuperAdmin ? (role || "agent") : "agent";
+    const finalTenantId = isSuperAdmin ? (tenant_id || null) : (req.tenant_id || null);
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const newAdmin = await Admin.save({
       username,
       password: hashedPassword,
-      role: role || "admin",
-      tenant_id: tenant_id || null,
+      role: finalRole,
+      tenant_id: finalTenantId,
       createdAt: new Date(),
     });
-    const token = jwt.sign(
-      { id: newAdmin.id, username: newAdmin.username, role: newAdmin.role, tenant_id: newAdmin.tenant_id || null },
-      JWT_SECRET,
-      { expiresIn: "24h" }
-    );
-    res.cookie("admin_token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 24 * 60 * 60 * 1000,
+
+    res.status(201).json({
+      success: true,
+      username: newAdmin.username,
+      role: newAdmin.role,
+      tenant_id: newAdmin.tenant_id || null
     });
-    res.status(201).json({ token, username: newAdmin.username, role: newAdmin.role, tenant_id: newAdmin.tenant_id || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -238,7 +283,16 @@ app.get("/api/auth/meta/url", authenticateAdmin, requireAdmin, async (req, res) 
     const scopes = type === "whatsapp"
       ? "whatsapp_business_management,whatsapp_business_messaging"
       : "pages_show_list,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages";
-    const url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${process.env.FB_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code`;
+
+    const state = crypto.randomBytes(16).toString("hex");
+    res.cookie("meta_oauth_state", state, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 10 * 60 * 1000 // 10 minutes
+    });
+
+    const url = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${process.env.FB_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scopes}&response_type=code&state=${state}`;
     res.json({ url });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -249,6 +303,18 @@ app.get("/api/auth/meta/callback", async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code) return res.status(400).send("No code provided");
+
+    // Retrieve state from cookie
+    const cookies = req.headers.cookie || "";
+    const match = cookies.match(/meta_oauth_state=([^;]+)/);
+    const cookieState = match ? match[1] : null;
+
+    res.clearCookie("meta_oauth_state");
+
+    if (!state || !cookieState || state !== cookieState) {
+      return res.status(400).send("CSRF Validation Failed: State mismatch or missing.");
+    }
+
     const redirectUri = process.env.META_REDIRECT_URI || `${process.env.BASE_URL || "http://localhost:3000"}/api/auth/meta/callback`;
     const tokenRes = await axios.get(`https://graph.facebook.com/v19.0/oauth/access_token?client_id=${process.env.FB_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${process.env.FB_APP_SECRET}&code=${code}`);
     const { access_token: shortToken } = tokenRes.data;
@@ -320,15 +386,17 @@ app.post("/webhook/messenger", async (req, res) => {
   // Verify webhook signature
   const signature = req.headers["x-hub-signature-256"];
   const fbSecret = process.env.FB_APP_SECRET;
-  if (signature && fbSecret) {
-    const rawBodyStr = req.rawBody || "";
-    const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
-    if (signature !== expected) {
-      console.warn(" [Webhook] Invalid Messenger signature");
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (signature && !req.rawBody) {
+    console.error(" [Webhook Error] x-hub-signature-256 is present but req.rawBody is missing! Check express body-parser configuration.");
+  }
+
+  if (isProduction || signature || fbSecret) {
+    if (!signature || !fbSecret || !verifyMetaSignature(req.rawBody || "", signature, fbSecret)) {
+      console.warn(` [Webhook] Signature verification failed or missing for Messenger (Signature: ${signature ? "Present" : "Missing"}, Secret: ${fbSecret ? "Present" : "Missing"})`);
       return res.sendStatus(403);
     }
-  } else if (signature && !fbSecret) {
-    console.warn("[Webhook] FB_APP_SECRET not set — cannot verify signature");
   }
 
   res.status(200).send("EVENT_RECEIVED");
@@ -386,15 +454,17 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // Verify webhook signature (X-Hub-Signature-256)
     const signature = req.headers["x-hub-signature-256"];
     const fbSecret = process.env.FB_APP_SECRET;
-    if (signature && fbSecret) {
-      const rawBodyStr = req.rawBody || "";
-      const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
-      if (signature !== expected) {
-        console.warn(" [Webhook] Invalid WhatsApp signature");
+    const isProduction = process.env.NODE_ENV === "production";
+
+    if (signature && !req.rawBody) {
+      console.error(" [Webhook Error] x-hub-signature-256 is present but req.rawBody is missing! Check express body-parser configuration.");
+    }
+
+    if (isProduction || signature || fbSecret) {
+      if (!signature || !fbSecret || !verifyMetaSignature(req.rawBody || "", signature, fbSecret)) {
+        console.warn(` [Webhook] Signature verification failed or missing for WhatsApp (Signature: ${signature ? "Present" : "Missing"}, Secret: ${fbSecret ? "Present" : "Missing"})`);
         return res.sendStatus(403);
       }
-    } else if (signature && !fbSecret) {
-      console.warn("[Webhook] FB_APP_SECRET not set — cannot verify WhatsApp signature");
     }
 
     res.status(200).send("EVENT_RECEIVED");
@@ -452,15 +522,17 @@ app.post("/webhook/instagram", async (req, res) => {
   // Verify webhook signature
   const signature = req.headers["x-hub-signature-256"];
   const fbSecret = process.env.FB_APP_SECRET;
-  if (signature && fbSecret) {
-    const rawBodyStr = req.rawBody || "";
-    const expected = "sha256=" + crypto.createHmac("sha256", fbSecret).update(rawBodyStr).digest("hex");
-    if (signature !== expected) {
-      console.warn(" [Webhook] Invalid Instagram signature");
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (signature && !req.rawBody) {
+    console.error(" [Webhook Error] x-hub-signature-256 is present but req.rawBody is missing! Check express body-parser configuration.");
+  }
+
+  if (isProduction || signature || fbSecret) {
+    if (!signature || !fbSecret || !verifyMetaSignature(req.rawBody || "", signature, fbSecret)) {
+      console.warn(` [Webhook] Signature verification failed or missing for Instagram (Signature: ${signature ? "Present" : "Missing"}, Secret: ${fbSecret ? "Present" : "Missing"})`);
       return res.sendStatus(403);
     }
-  } else if (signature && !fbSecret) {
-    console.warn("[Webhook] FB_APP_SECRET not set — cannot verify Instagram signature");
   }
 
   res.status(200).send("EVENT_RECEIVED");
@@ -1637,9 +1709,20 @@ app.all("*", (req, res) => {
 async function initAdmin() {
   const existing = await Admin.findOne({ username: "admin" });
   if (!existing) {
-    const hashed = await bcrypt.hash(process.env.ADMIN_PASSWORD || "admin123", 10);
-    await Admin.save({ username: "admin", password: hashed, role: "admin" });
-    console.log(" Default admin created (admin/admin123)");
+    const bootstrap = process.env.BOOTSTRAP_ADMIN === "true" || process.env.NODE_ENV !== "production";
+    if (bootstrap) {
+      const password = process.env.ADMIN_PASSWORD;
+      if (!password && process.env.NODE_ENV === "production") {
+        console.error("❌ ERROR: ADMIN_PASSWORD must be configured in production when bootstrapping an admin!");
+        process.exit(1);
+      }
+      const finalPassword = password || "admin123";
+      const hashed = await bcrypt.hash(finalPassword, 10);
+      await Admin.save({ username: "admin", password: hashed, role: "admin" });
+      console.log(` Default admin created (admin/${password ? "******" : "admin123"})`);
+    } else {
+      console.log(" Skipping admin auto-bootstrap in production because BOOTSTRAP_ADMIN is not true.");
+    }
   }
 }
 

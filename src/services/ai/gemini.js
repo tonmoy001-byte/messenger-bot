@@ -305,10 +305,10 @@ async function callAI(messages, mediaData = null) {
     console.error(`[AI] ${primary} failed: ${err.message}`);
 
     const status = err.response?.status || 0;
-    const isRetryable = err.code === "ETIMEDOUT" || status === 429 || status === 503 || status === 500;
+    const isRetryable = err.code === "ETIMEDOUT" || status === 429 || status === 503 || status === 500 || status === 401 || status === 403;
 
     if (isRetryable) {
-      console.log(`[AI] Falling back to ${secondary}...`);
+      console.warn(`[AI] ${primary} failed with status ${status}. Falling back to ${secondary}...`);
       try {
         const reply = secondary === "groq"
           ? await callGroq(messages, mediaData)
