@@ -213,11 +213,19 @@ async function getWooOrders(storeUrl, consumerKey, consumerSecret, limit = 50) {
  * Verify WooCommerce webhook signature.
  */
 function verifyWooWebhook(body, signature, secret) {
+  if (!signature || !secret) return false;
   const hash = crypto
     .createHmac("sha256", secret)
     .update(body, "utf8")
     .digest("base64");
-  return hash === signature;
+
+  const hashBuffer = Buffer.from(hash, "utf8");
+  const sigBuffer = Buffer.from(signature, "utf8");
+
+  if (hashBuffer.length !== sigBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(hashBuffer, sigBuffer);
 }
 
 module.exports = {

@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
 
-const BACKEND_URL = process.env.BACKEND_URL || ""
+const BACKEND_URL = (process.env.BACKEND_URL || "http://localhost:3000").replace(/\/+$/, "")
 
 async function proxyRequest(request: NextRequest, path: string) {
   const url = new URL(request.url)
-  const backendUrl = `${BACKEND_URL}${path}${url.search}`
+  let backendUrl: string
+  try {
+    backendUrl = `${BACKEND_URL}${path}${url.search}`
+    new URL(backendUrl)
+  } catch (e) {
+    return NextResponse.json(
+      { error: `Invalid BACKEND_URL configured: ${BACKEND_URL}` },
+      { status: 500 }
+    )
+  }
 
   const headers = new Headers()
   // Copy relevant headers

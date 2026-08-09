@@ -8,8 +8,12 @@
 
 const jwt = require("jsonwebtoken");
 const { runWithTenantContext } = require("../../utils/tenantContext");
+const { requireEnv } = require("../config/env");
 
-const JWT_SECRET = process.env.JWT_SECRET || "cyberbot-admin-secret-key-change-in-production";
+const JWT_SECRET = requireEnv("JWT_SECRET", {
+  minLength: 16,
+  forbid: ["cyberbot-admin-secret-key-change-in-production", "your_jwt_secret_key"]
+});
 
 /**
  * authenticateTenant Middleware

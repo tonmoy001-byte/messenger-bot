@@ -22,6 +22,10 @@ let bkashToken = null;
 let bkashTokenExpiry = null;
 
 async function getBkashToken() {
+  if (!BKASH_CONFIG.appKey || !BKASH_CONFIG.appSecret || !BKASH_CONFIG.username || !BKASH_CONFIG.password) {
+    console.warn("⚠️ [Bkash Payment] Gateway credentials are not configured. Check BKASH_APP_KEY, BKASH_APP_SECRET, BKASH_USERNAME, BKASH_PASSWORD.");
+    return null;
+  }
   if (bkashToken && bkashTokenExpiry && Date.now() < bkashTokenExpiry) {
     return bkashToken;
   }
@@ -132,6 +136,10 @@ const NAGAD_CONFIG = {
 };
 
 async function createNagadPayment(orderId, amount, callbackUrl) {
+  if (!NAGAD_CONFIG.merchantId || !NAGAD_CONFIG.merchantNumber) {
+    console.warn("⚠️ [Nagad Payment] Gateway credentials are not configured. Check NAGAD_MERCHANT_ID, NAGAD_MERCHANT_NUMBER.");
+    return { success: false, error: "Nagad payment gateway is not configured" };
+  }
   try {
     const order = await Order.findById(orderId);
     if (!order) return { success: false, error: "Order not found" };
