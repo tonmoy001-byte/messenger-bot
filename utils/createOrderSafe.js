@@ -8,6 +8,7 @@
  * - Includes tenant_id in idempotency fingerprint
  * - Persists tenant_id on the order row
  * - Scopes DB duplicate checks by tenant when available
+ * - In production, refuses create without tenant_id
  */
 const { Order } = require("../src/config/db");
 const {
@@ -78,7 +79,6 @@ async function createOrderSafeInner(uid, orderData, tenant_id) {
     status: "pending",
   };
 
-  // Explicit tenant_id so isolation holds even if ALS context is missing
   if (tenant_id) {
     orderPayload.tenant_id = tenant_id;
   }
@@ -97,17 +97,16 @@ async function createOrderSafeInner(uid, orderData, tenant_id) {
   return { success: true, orderId: order.orderId, order };
 }
 
-/**
- * @param {string} uid
- * @param {object} orderData
- * @param {string} [orderData.tenant_id] - optional explicit tenant
- */
 async function createOrderSafe(uid, orderData = {}) {
   try {
     const tenant_id = resolveTenantId(orderData);
     const ctx = getTenantContext();
 
-    // Ensure Model auto-scoping sees the same tenant during create/find
+    if (!tenant_id && process.env.NODE_ENV === "production") {
+      console.error("❌ createOrderSafe: tenant_id required in production");
+      return { success: false, error: "tenant_id required" };
+    }
+
     if (tenant_id && (!ctx || ctx.tenant_id !== tenant_id)) {
       return await runWithTenantContext(
         { tenant_id, role: (ctx && ctx.role) || "system", isSuperAdmin: false },
