@@ -30,7 +30,16 @@ const MULTI_TENANT_TABLES = [
   "knowledge_base",
   "messages",
   "integrations",
-  "tenant_channels"
+  "tenant_channels",
+  "order_sessions",
+  "payments",
+  "ecommerce_connections",
+  "settings",
+  "feedback",
+  "ads",
+  "ad_clicks",
+  "templates",
+  "broadcasts"
 ];
 
 /**
@@ -814,11 +823,144 @@ class FindOneQuery {
   }
 }
 
+/**
+ * SettingsModel: Extends Model to enforce per-tenant settings querying and caching.
+ * Bypasses global configId: "global" when in tenant context (multi-tenant mode).
+ */
+class SettingsModel extends Model {
+  constructor() {
+    super("settings");
+    this.cache = new Map();
+  }
+
+  invalidateCache(tenantId) {
+    if (tenantId) {
+      this.cache.delete(tenantId);
+    } else {
+      this.cache.clear();
+    }
+  }
+
+  findOne(filter = {}) {
+    const ctx = getTenantContext();
+    if (ctx && ctx.tenant_id) {
+      const tenantId = ctx.tenant_id;
+      if (this.cache.has(tenantId)) {
+        const cachedVal = this.cache.get(tenantId);
+        return {
+          then: (resolve) => resolve(cachedVal)
+        };
+      }
+      const cleanFilter = { ...filter };
+      delete cleanFilter.configId;
+
+      const query = new FindOneQuery(this.client, this.tableName, cleanFilter);
+      const originalThen = query.then.bind(query);
+      query.then = (resolve) => {
+        return originalThen((result) => {
+          if (result) {
+            this.cache.set(tenantId, result);
+          }
+          resolve(result);
+        });
+      };
+      return query;
+    }
+    return super.findOne(filter);
+  }
+
+  async findOneAndUpdate(filter, update, options = {}) {
+    const ctx = getTenantContext();
+    const cleanFilter = { ...filter };
+    if (ctx && ctx.tenant_id) {
+      delete cleanFilter.configId;
+    }
+    const result = await super.findOneAndUpdate(cleanFilter, update, options);
+    if (ctx && ctx.tenant_id) {
+      if (result) {
+        this.cache.set(ctx.tenant_id, result);
+      } else {
+        this.cache.delete(ctx.tenant_id);
+      }
+    }
+    return result;
+  }
+
+  async findByIdAndUpdate(id, update, options = {}) {
+    const ctx = getTenantContext();
+    const result = await super.findByIdAndUpdate(id, update, options);
+    if (ctx && ctx.tenant_id) {
+      if (result) {
+        this.cache.set(ctx.tenant_id, result);
+      } else {
+        this.cache.delete(ctx.tenant_id);
+      }
+    }
+    return result;
+  }
+
+  async save(doc) {
+    const ctx = getTenantContext();
+    const result = await super.save(doc);
+    if (ctx && ctx.tenant_id) {
+      if (result) {
+        this.cache.set(ctx.tenant_id, result);
+      }
+    }
+    return result;
+  }
+
+  async updateOne(filter, update) {
+    const ctx = getTenantContext();
+    const result = await super.updateOne(filter, update);
+    if (ctx && ctx.tenant_id) {
+      this.cache.delete(ctx.tenant_id);
+    }
+    return result;
+  }
+
+  async updateMany(filter, update) {
+    const ctx = getTenantContext();
+    const result = await super.updateMany(filter, update);
+    if (ctx && ctx.tenant_id) {
+      this.cache.delete(ctx.tenant_id);
+    }
+    return result;
+  }
+
+  async deleteOne(filter) {
+    const ctx = getTenantContext();
+    const result = await super.deleteOne(filter);
+    if (ctx && ctx.tenant_id) {
+      this.cache.delete(ctx.tenant_id);
+    }
+    return result;
+  }
+
+  async deleteMany(filter) {
+    const ctx = getTenantContext();
+    const result = await super.deleteMany(filter);
+    if (ctx && ctx.tenant_id) {
+      this.cache.delete(ctx.tenant_id);
+    }
+    return result;
+  }
+
+  async findByIdAndDelete(id) {
+    const ctx = getTenantContext();
+    const result = await super.findByIdAndDelete(id);
+    if (ctx && ctx.tenant_id) {
+      this.cache.delete(ctx.tenant_id);
+    }
+    return result;
+  }
+}
+
 // ─── Table instances (Mongoose model replacements) ───────────
 const User = new Model("users");
 const Admin = new Model("admins");
 const Message = new Model("messages");
-const Settings = new Model("settings");
+const Settings = new SettingsModel();
 const Integration = new Model("integrations");
 const Order = new Model("orders");
 const Product = new Model("products");
