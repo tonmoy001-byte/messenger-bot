@@ -11,12 +11,13 @@ const hostname = "localhost";
 const nextApp = next({ dev, hostname, port, dir: "./dashboard" });
 const handle = nextApp.getRequestHandler();
 
-// Public health endpoints (shared module; also register from index.js for direct starts)
+// Public health endpoints (registered before Next.js catch-all)
 registerHealthRoutes(app);
 
 async function main() {
   await nextApp.prepare();
 
+  // Next.js handles remaining routes (must be last)
   app.use((req, res) => {
     const parsedUrl = parse(req.url, true);
     handle(req, res, parsedUrl);

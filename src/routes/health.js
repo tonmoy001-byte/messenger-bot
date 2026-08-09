@@ -1,11 +1,15 @@
 /**
- * src/routes/health.js
- * Shared public health / readiness routes.
- * Safe to register from both index.js and src/server.js (idempotent).
+ * Shared health / readiness endpoints.
+ * Registered early (before Next.js catch-all) from both index.js and server.js.
  */
 function registerHealthRoutes(app) {
-  if (app.__cyberbotHealthRegistered) return;
-  app.__cyberbotHealthRegistered = true;
+  if (!app || typeof app.get !== "function") {
+    throw new Error("registerHealthRoutes requires an Express app");
+  }
+
+  // Avoid double-registration if both entrypoints load
+  if (app.__healthRoutesRegistered) return;
+  app.__healthRoutesRegistered = true;
 
   app.get("/health", (req, res) => {
     res.status(200).json({
@@ -37,6 +41,7 @@ function registerHealthRoutes(app) {
       checks.redis = false;
     }
 
+    // DB is required; Redis is preferred but optional
     const ready = checks.db;
     res.status(ready ? 200 : 503).json({
       status: ready ? "ready" : "not_ready",
