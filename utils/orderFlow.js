@@ -34,14 +34,9 @@ async function clearFlowState(uid) {
   await OrderSession.findOneAndUpdate({ uid }, { $set: { state: FLOW_STATE.IDLE, selectedProduct: null, quantity: 1, deliveryAddress: "", phone: "", updatedAt: new Date() } }, { upsert: true });
 }
 
-/**
- * Detect if user wants to buy something
- * Keywords that indicate purchase intent
- */
 function detectPurchaseIntent(message) {
    const lowerMsg = message.toLowerCase().trim();
 
-   // Explicit buy keywords — strong purchase signals
    const buyKeywords = [
      "buy", "purchase", "ordered", "ordering", "কিনতে চাই", "অর্ডার", "কেনা", "কিনব",
      "want to buy", "need this", "দাম", "দাম কত",
@@ -53,7 +48,6 @@ function detectPurchaseIntent(message) {
    const hasBuyKeyword = buyKeywords.some(keyword => lowerMsg.includes(keyword));
    if (hasBuyKeyword) return true;
 
-   // Contextual purchase patterns — require purchase context words
    const contextualPatterns = [
      /\b(i\s+)?(need|want)\s+(to\s+)?(buy|order|purchase|enroll|subscribe|get)\b/,
      /\bdo\s+you\s+(sell|offer|carry)\b/,
@@ -67,8 +61,6 @@ function detectPurchaseIntent(message) {
 
    if (contextualPatterns.some(p => p.test(lowerMsg))) return true;
 
-   // Negative patterns — these indicate the user is NOT trying to buy.
-   // Evaluated last so explicit purchase signals win over broad negatives.
    const negativePatterns = [
      /\b(hi|hello|hey|how are|help|support|question|info|information|about|tell me more|who is|where is|when|why|how (?!much|to)|can you|what products|what services|what product line|product list|menu)\b/,
      /\b(thank|thanks|appreciate|great|good|nice|love|like|interesting|cool|ok|okay|sure|sounds|yes|no(?!.*buy|.*order|.*purchase))\b/,
@@ -79,44 +71,24 @@ function detectPurchaseIntent(message) {
    return false;
  }
 
-/**
- * Parse user intent from natural language input.
- * Returns structured intent object for order flow handlers.
- */
 function parseOrderIntent(input) {
   const lower = input.toLowerCase().trim();
 
-  // Greeting intent
   if (/\b(hi|hello|hey|sup|yo|hola)\b/.test(lower)) return { intent: "greeting" };
-
-  // Menu/product catalog intent
   if (/\b(product|menu|catalog|show|see|browse|list|items|all)\b/.test(lower)) return { intent: "show_menu" };
-
-  // Purchase intent (re-enter or continue order flow)
   if (/\b(buy|order|purchase|need|want|get|take)\b/.test(lower)) return { intent: "purchase" };
-
-  // Exit/cancel intent (fuzzy matching)
   if (/\b(cancel|exit|back|stop|never\s*mind|no\s*thanks|quit|leave|go\s*back|start\s*over|abort|end|done|finish)\b/.test(lower)) return { intent: "exit" };
-
-  // Help intent
   if (/\b(help|support|assist|guide|how|what)\b/.test(lower)) return { intent: "help" };
 
-  // Numeric selection
   const num = parseInt(lower);
   if (!isNaN(num) && num > 0) return { intent: "selection", number: num };
 
-  // Yes/confirm intent
   if (/\b(yes|confirm|ok|okay|sure|agree|হ্যাঁ|জি|thik|টিক)\b/.test(lower)) return { intent: "confirm" };
-
-  // No/reject intent
   if (/\b(no|nope|nah|cancel|না|নেই)\b/.test(lower)) return { intent: "reject" };
 
   return { intent: "unknown" };
 }
 
-/**
- * Fetch products from database
- */
 async function getProducts(category = null) {
   try {
     const API_URL = process.env.API_URL || "http://localhost:3000";
@@ -132,38 +104,17 @@ async function getProducts(category = null) {
   }
 }
 
-/**
- * Create order in database
- */
 async function createOrder(uid, orderData) {
-  try {
-    const API_URL = process.env.API_URL || "http://localhost:3000";
-    const response = await axios.post(`${API_URL}/api/orders/from-ai`, {
-      uid,
-      customerName: orderData.customerName,
-      customerPhone: orderData.customerPhone,
-      items: orderData.items,
-      deliveryAddress: orderData.deliveryAddress,
-      notes: orderData.notes || ""
-    }, { timeout: 10000 });
-
-    // Track ad conversion if user came from an ad
-    if (response.data?.order?.id) {
-      const { markAdConversion } = require("./adTracking");
-      await markAdConversion(uid, response.data.order.id);
-    }
-
-    return response.data;
-  } catch (err) {
-    console.error("❌ Failed to create order:", err.message);
+  // Use Redis-backed idempotent path (no HTTP self-call)
+  const { createOrderSafe } = require("./createOrderSafe");
+  const result = await createOrderSafe(uid, orderData);
+  if (!result || result.success === false) {
+    console.error("❌ Failed to create order:", result?.error || "unknown");
     return null;
   }
+  return result;
 }
 
-/**
- * Process user message through order flow
- * Returns: { response, flowCompleted }
- */
 async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
   const session = await OrderSession.findOne({ uid });
   const flow = session ? { state: session.state, data: { selectedProduct: session.selectedProduct, quantity: session.quantity, deliveryAddress: session.deliveryAddress, phone: session.phone, customerPhone: session.phone } } : { state: FLOW_STATE.IDLE, data: {} };
@@ -171,21 +122,18 @@ async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
 
   console.log(` [OrderFlow] ${uid} - State: ${state}`);
 
-  // Auto-expire stale sessions (older than 30 minutes)
   if (state !== FLOW_STATE.IDLE && session && session.updatedAt) {
     const age = Date.now() - new Date(session.updatedAt).getTime();
     if (age > 30 * 60 * 1000) {
       await clearFlowState(uid);
-      // Fall through to normal AI handling below
     }
   }
 
-  // Allow users to cancel/exit the order flow with common phrases (fuzzy match)
   const lowerMsg = userMessage.toLowerCase().trim();
   const exitPatterns = /\b(cancel|exit|back|stop|never\s*mind|no\s*thanks|quit|leave|go\s*back|start\s*over|abort|end|done|help|menu)\b/;
   if (state !== FLOW_STATE.IDLE && exitPatterns.test(lowerMsg)) {
     await clearFlowState(uid);
-    return null; // Let normal AI handle it
+    return null;
   }
 
   if (state === FLOW_STATE.IDLE) {
@@ -200,7 +148,6 @@ async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
     return null;
   }
 
-  // Re-fetch products every time (products column doesn't exist in order_sessions table)
   const products = await getProducts();
 
   switch (state) {
@@ -213,11 +160,7 @@ async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
   }
 }
 
-/**
- * Format products list for display
- */
 function formatProductsMessage(products) {
-  // Group by category
   const byCategory = {
     products: products.filter(p => p.category === "products"),
     courses: products.filter(p => p.category === "courses"),
@@ -260,19 +203,14 @@ function formatProductsMessage(products) {
   return { message, items: allItems };
 }
 
-/**
- * Handle product selection
- */
 async function handleProductSelection(uid, userMessage, products) {
   const intent = parseOrderIntent(userMessage);
 
-  // Handle exit intent
   if (intent.intent === "exit") {
     await clearFlowState(uid);
     return null;
   }
 
-  // Handle greeting - be helpful
   if (intent.intent === "greeting") {
     return {
       response: "Hi there! 👋 Please select a product from the list above by typing its number (1-" + products.length + "), or type 'cancel' to exit ordering.",
@@ -280,13 +218,11 @@ async function handleProductSelection(uid, userMessage, products) {
     };
   }
 
-  // Handle menu request - re-show products
   if (intent.intent === "show_menu") {
     const { message } = formatProductsMessage(products);
     return { response: message, flowCompleted: false };
   }
 
-  // Handle help
   if (intent.intent === "help") {
     return {
       response: "Here's how to order:\n• Type a **number** (1-" + products.length + ") to select a product\n• Type 'menu' to see all products\n• Type 'cancel' to exit ordering\n\nWhat would you like to do?",
@@ -294,11 +230,9 @@ async function handleProductSelection(uid, userMessage, products) {
     };
   }
 
-  // Handle numeric selection
   if (intent.intent === "selection") {
     const selectedNum = intent.number;
 
-    // Get all products flattened
     const byCategory = {
       products: products.filter(p => p.category === "products"),
       courses: products.filter(p => p.category === "courses"),
@@ -320,7 +254,6 @@ async function handleProductSelection(uid, userMessage, products) {
       };
     }
 
-    // Store selected product and move to quantity
     await setFlowState(uid, FLOW_STATE.GETTING_QUANTITY, {
       products,
       selectedProduct: selectedItem,
@@ -333,32 +266,25 @@ async function handleProductSelection(uid, userMessage, products) {
     };
   }
 
-  // Handle purchase intent - re-show menu
   if (intent.intent === "purchase") {
     const { message } = formatProductsMessage(products);
     return { response: "Sure! Here are our products:\n\n" + message, flowCompleted: false };
   }
 
-  // Unknown intent - helpful fallback
   return {
     response: "I didn't quite understand that. Please:\n• Type a **number** (1-" + products.length + ") to select a product\n• Type 'menu' to see all products\n• Type 'cancel' to exit ordering",
     flowCompleted: false
   };
 }
 
-/**
- * Handle quantity input
- */
 async function handleQuantity(uid, userMessage, data) {
   const intent = parseOrderIntent(userMessage);
 
-  // Handle exit
   if (intent.intent === "exit") {
     await clearFlowState(uid);
     return null;
   }
 
-  // Handle help
   if (intent.intent === "help") {
     return {
       response: `Please enter how many of *${data.selectedProduct?.name || "this item"}* you want.\nExample: "2" or "3"\n\nType 'cancel' to exit ordering.`,
@@ -366,7 +292,6 @@ async function handleQuantity(uid, userMessage, data) {
     };
   }
 
-  // Handle numeric quantity
   if (intent.intent === "selection") {
     const quantity = intent.number;
 
@@ -391,26 +316,20 @@ async function handleQuantity(uid, userMessage, data) {
     };
   }
 
-  // Non-numeric input - helpful message
   return {
     response: `Please enter a quantity (number) for *${data.selectedProduct?.name || "this item"}*.\nExample: "1", "2", or "3"\n\nType 'cancel' to exit ordering.`,
     flowCompleted: false
   };
 }
 
-/**
- * Handle address input
- */
 async function handleAddress(uid, userMessage, data) {
   const intent = parseOrderIntent(userMessage);
 
-  // Handle exit
   if (intent.intent === "exit") {
     await clearFlowState(uid);
     return null;
   }
 
-  // Handle help
   if (intent.intent === "help") {
     return {
       response: "Please provide your full delivery address including area/city.\nExample: '123 Main St, Dhaka 1205'\n\nType 'cancel' to exit ordering.",
@@ -438,19 +357,14 @@ async function handleAddress(uid, userMessage, data) {
   };
 }
 
-/**
- * Handle phone input and show confirmation
- */
 async function handlePhone(uid, userMessage, data, userName) {
   const intent = parseOrderIntent(userMessage);
 
-  // Handle exit
   if (intent.intent === "exit") {
     await clearFlowState(uid);
     return null;
   }
 
-  // Handle help
   if (intent.intent === "help") {
     return {
       response: "Please provide a valid Bangladeshi phone number (10+ digits).\nExamples: 01712345678 or +8801712345678\n\nType 'cancel' to exit ordering.",
@@ -459,11 +373,8 @@ async function handlePhone(uid, userMessage, data, userName) {
   }
 
   let phone = userMessage.trim();
-
-  // Clean phone number - remove any non-digit characters except +
   phone = phone.replace(/[^\d+]/g, "");
 
-  // Basic validation - at least 10 digits
   const digitCount = phone.replace(/\+/g, "").length;
   if (digitCount < 10) {
     return {
@@ -472,14 +383,13 @@ async function handlePhone(uid, userMessage, data, userName) {
     };
   }
 
-  // Add country code if not present
   if (!phone.startsWith("+")) {
     if (phone.startsWith("88")) {
-      phone = "+" + phone; // 8801712345678 → +8801712345678
+      phone = "+" + phone;
     } else if (phone.startsWith("0")) {
-      phone = "+88" + phone; // 01712345678 → +8801712345678
+      phone = "+88" + phone;
     } else {
-      phone = "+880" + phone; // 1712345678 → +8801712345678
+      phone = "+880" + phone;
     }
   }
 
@@ -494,7 +404,6 @@ async function handlePhone(uid, userMessage, data, userName) {
     customerName: userName || "Customer"
   });
 
-  // Show confirmation summary
   const summary = `
 📋 **ORDER SUMMARY**
 ━━━━━━━━━━━━━━━━━━
@@ -518,21 +427,15 @@ async function handlePhone(uid, userMessage, data, userName) {
   };
 }
 
-/**
- * Handle order confirmation
- */
 async function handleConfirmation(uid, userMessage, data) {
   const intent = parseOrderIntent(userMessage);
 
-  // Handle confirm intent
   if (intent.intent === "confirm" || userMessage.toLowerCase().trim() === "yes" || userMessage.toLowerCase().trim() === "confirm") {
     const selectedProduct = data.selectedProduct;
     const quantity = data.quantity;
     const totalPrice = selectedProduct.price * quantity;
 
-    // Try to create order in connected e-commerce platform first
     let orderResult = null;
-    let externalOrderId = null;
 
     const shopifyConn = await EcommerceConnection.findOne({ platform: "shopify", isActive: true });
     const wooConn = await EcommerceConnection.findOne({ platform: "woocommerce", isActive: true });
@@ -554,7 +457,6 @@ async function handleConfirmation(uid, userMessage, data) {
         paymentStatus: "pending"
       });
       if (shopifyResult.success) {
-        externalOrderId = shopifyResult.orderId;
         orderResult = { success: true, orderId: `SP-${shopifyResult.orderNumber}` };
       }
     }
@@ -576,7 +478,6 @@ async function handleConfirmation(uid, userMessage, data) {
         paymentStatus: "pending"
       });
       if (wooResult.success) {
-        externalOrderId = wooResult.orderId;
         orderResult = { success: true, orderId: `WC-${wooResult.orderNumber}` };
         const stockUpdate = await updateWooStock(
           wooConn.storeUrl,
@@ -589,7 +490,6 @@ async function handleConfirmation(uid, userMessage, data) {
       }
     }
 
-    // Fallback to local order creation
     if (!orderResult) {
       orderResult = await createOrder(uid, {
         customerName: data.customerName,
@@ -636,9 +536,6 @@ async function handleConfirmation(uid, userMessage, data) {
   }
 }
 
-/**
- * Cancel order flow manually
- */
 async function cancelOrderFlow(uid) {
   await clearFlowState(uid);
 }
