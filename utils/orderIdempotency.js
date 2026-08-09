@@ -1,10 +1,10 @@
 /**
  * utils/orderIdempotency.js
- * ─────────────────────────────────────────────────────────────
+ * ───────────────────────────────────────────────────────────
  * Deterministic order fingerprint + Redis-backed short-window
  * idempotency to prevent duplicate orders from concurrent or
  * retried requests.
- * ─────────────────────────────────────────────────────────────
+ * ───────────────────────────────────────────────────────────
  */
 const crypto = require("crypto");
 const Redis = require("ioredis");
@@ -55,7 +55,8 @@ async function ensureConnected() {
 
 /**
  * Build a stable fingerprint for an order attempt.
- * Includes uid, items, and optional customer identifiers.
+ * Includes tenant_id, uid, items, and optional customer identifiers
+ * so idempotency keys never collide across tenants.
  */
 function buildOrderKey(uid, items, extra = {}) {
   const normalizedItems = (items || [])
@@ -68,6 +69,7 @@ function buildOrderKey(uid, items, extra = {}) {
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
 
   const payload = JSON.stringify({
+    tenant_id: String(extra.tenant_id || ""),
     uid: String(uid || ""),
     items: normalizedItems,
     phone: (extra.customerPhone || extra.phone || "").replace(/\D/g, ""),
@@ -140,15 +142,38 @@ async function markOrderCreated(orderKey, orderId) {
   }
 }
 
-async function findRecentDuplicateOrder(OrderModel, uid, totalAmount, windowMs = 120000) {
+/**
+ * Find a recent duplicate order for the same uid (+ optional tenant).
+ * @param {object} OrderModel
+ * @param {string} uid
+ * @param {number} totalAmount
+ * @param {object|number} [optionsOrWindow] - { tenant_id, windowMs } or legacy windowMs number
+ */
+async function findRecentDuplicateOrder(OrderModel, uid, totalAmount, optionsOrWindow = {}) {
   if (!OrderModel || !uid) return null;
+
+  let windowMs = 120000;
+  let tenant_id = null;
+  if (typeof optionsOrWindow === "number") {
+    windowMs = optionsOrWindow;
+  } else if (optionsOrWindow && typeof optionsOrWindow === "object") {
+    if (optionsOrWindow.windowMs) windowMs = optionsOrWindow.windowMs;
+    if (optionsOrWindow.tenant_id) tenant_id = optionsOrWindow.tenant_id;
+  }
+
   try {
     const since = new Date(Date.now() - windowMs);
-    const recent = await OrderModel.find({
+    const filter = {
       uid,
       totalAmount,
       createdAt: { $gte: since },
-    })
+    };
+    // Explicit tenant filter when available (Model may also scope via ALS)
+    if (tenant_id) {
+      filter.tenant_id = tenant_id;
+    }
+
+    const recent = await OrderModel.find(filter)
       .sort({ createdAt: -1 })
       .limit(5);
 

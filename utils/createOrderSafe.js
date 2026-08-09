@@ -2,6 +2,12 @@
  * utils/createOrderSafe.js
  * Idempotent local order creation used by the AI order flow.
  * Prefer this over HTTP round-trip to /api/orders/from-ai.
+ *
+ * Tenant isolation:
+ * - Resolves tenant_id from orderData.tenant_id or AsyncLocalStorage context
+ * - Includes tenant_id in idempotency fingerprint
+ * - Persists tenant_id on the order row
+ * - Scopes DB duplicate checks by tenant when available
  */
 const { Order } = require("../src/config/db");
 const {
@@ -10,73 +16,110 @@ const {
   markOrderCreated,
   findRecentDuplicateOrder,
 } = require("./orderIdempotency");
+const { getTenantContext, runWithTenantContext } = require("./tenantContext");
 
-async function createOrderSafe(uid, orderData) {
+function resolveTenantId(orderData = {}) {
+  if (orderData.tenant_id) return orderData.tenant_id;
+  const ctx = getTenantContext();
+  return (ctx && ctx.tenant_id) || null;
+}
+
+async function createOrderSafeInner(uid, orderData, tenant_id) {
+  const items = orderData.items || [];
+  if (!uid || items.length === 0) {
+    return { success: false, error: "Missing required fields" };
+  }
+
+  const orderKey = buildOrderKey(uid, items, {
+    customerPhone: orderData.customerPhone,
+    deliveryAddress: orderData.deliveryAddress,
+    tenant_id,
+  });
+
+  const claim = await claimOrderKey(orderKey, "pending");
+  if (claim.isDuplicate) {
+    return {
+      success: true,
+      orderId: claim.orderId,
+      duplicate: true,
+    };
+  }
+
+  const totalAmount = items.reduce(
+    (sum, item) => sum + Number(item.price) * Number(item.quantity || 1),
+    0
+  );
+
+  const recentDup = await findRecentDuplicateOrder(Order, uid, totalAmount, {
+    tenant_id,
+  });
+  if (recentDup) {
+    const existingId = recentDup.orderId || recentDup.id;
+    await markOrderCreated(orderKey, existingId);
+    return { success: true, orderId: existingId, duplicate: true, order: recentDup };
+  }
+
+  const orderId =
+    "ORD-" +
+    Date.now().toString(36).toUpperCase() +
+    Math.random().toString(36).substring(2, 6).toUpperCase();
+
+  const orderPayload = {
+    orderId,
+    uid,
+    customerName: orderData.customerName || "AI Customer",
+    customerPhone: orderData.customerPhone || "",
+    items,
+    totalAmount,
+    shippingAddress: orderData.deliveryAddress
+      ? { address: orderData.deliveryAddress }
+      : {},
+    notes: orderData.notes || "",
+    status: "pending",
+  };
+
+  // Explicit tenant_id so isolation holds even if ALS context is missing
+  if (tenant_id) {
+    orderPayload.tenant_id = tenant_id;
+  }
+
+  const order = await Order.create(orderPayload);
+
+  await markOrderCreated(orderKey, order.orderId);
+
   try {
-    const items = orderData.items || [];
-    if (!uid || items.length === 0) {
-      return { success: false, error: "Missing required fields" };
+    const { markAdConversion } = require("./adTracking");
+    await markAdConversion(uid, order.id || order.orderId);
+  } catch (_) {
+    /* optional */
+  }
+
+  return { success: true, orderId: order.orderId, order };
+}
+
+/**
+ * @param {string} uid
+ * @param {object} orderData
+ * @param {string} [orderData.tenant_id] - optional explicit tenant
+ */
+async function createOrderSafe(uid, orderData = {}) {
+  try {
+    const tenant_id = resolveTenantId(orderData);
+    const ctx = getTenantContext();
+
+    // Ensure Model auto-scoping sees the same tenant during create/find
+    if (tenant_id && (!ctx || ctx.tenant_id !== tenant_id)) {
+      return await runWithTenantContext(
+        { tenant_id, role: (ctx && ctx.role) || "system", isSuperAdmin: false },
+        () => createOrderSafeInner(uid, orderData, tenant_id)
+      );
     }
 
-    const orderKey = buildOrderKey(uid, items, {
-      customerPhone: orderData.customerPhone,
-      deliveryAddress: orderData.deliveryAddress,
-    });
-
-    const claim = await claimOrderKey(orderKey, "pending");
-    if (claim.isDuplicate) {
-      return {
-        success: true,
-        orderId: claim.orderId,
-        duplicate: true,
-      };
-    }
-
-    const totalAmount = items.reduce(
-      (sum, item) => sum + Number(item.price) * Number(item.quantity || 1),
-      0
-    );
-
-    const recentDup = await findRecentDuplicateOrder(Order, uid, totalAmount);
-    if (recentDup) {
-      const existingId = recentDup.orderId || recentDup.id;
-      await markOrderCreated(orderKey, existingId);
-      return { success: true, orderId: existingId, duplicate: true, order: recentDup };
-    }
-
-    const orderId =
-      "ORD-" +
-      Date.now().toString(36).toUpperCase() +
-      Math.random().toString(36).substring(2, 6).toUpperCase();
-
-    const order = await Order.create({
-      orderId,
-      uid,
-      customerName: orderData.customerName || "AI Customer",
-      customerPhone: orderData.customerPhone || "",
-      items,
-      totalAmount,
-      shippingAddress: orderData.deliveryAddress
-        ? { address: orderData.deliveryAddress }
-        : {},
-      notes: orderData.notes || "",
-      status: "pending",
-    });
-
-    await markOrderCreated(orderKey, order.orderId);
-
-    try {
-      const { markAdConversion } = require("./adTracking");
-      await markAdConversion(uid, order.id || order.orderId);
-    } catch (_) {
-      /* optional */
-    }
-
-    return { success: true, orderId: order.orderId, order };
+    return await createOrderSafeInner(uid, orderData, tenant_id);
   } catch (err) {
     console.error("❌ Failed to create order (safe path):", err.message);
     return { success: false, error: err.message };
   }
 }
 
-module.exports = { createOrderSafe };
+module.exports = { createOrderSafe, resolveTenantId };
