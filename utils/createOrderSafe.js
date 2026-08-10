@@ -28,7 +28,6 @@ async function createOrderSafe(uid, orderData = {}) {
 
     const tenant_id = resolveTenantId(orderData);
 
-    // Production hard-guard: never create unscoped orders
     if (!tenant_id && process.env.NODE_ENV === "production") {
       console.error(
         "❌ createOrderSafe refused: tenant_id required in production (uid=%s)",
