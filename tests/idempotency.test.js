@@ -59,3 +59,18 @@ test("findRecentDuplicateOrder stays backward compatible with numeric windowMs",
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].tenant_id, undefined);
 });
+
+const { resolveTenantId } = require("../utils/createOrderSafe");
+
+test("resolveTenantId prefers ALS context over payload", () => {
+  const { runWithTenantContext } = require("../utils/tenantContext");
+  const result = runWithTenantContext({ tenant_id: "als-tenant" }, () =>
+    resolveTenantId({ tenant_id: "payload-tenant" })
+  );
+  assert.strictEqual(result, "als-tenant");
+});
+
+test("resolveTenantId falls back to payload tenant_id", () => {
+  assert.strictEqual(resolveTenantId({ tenant_id: "payload-tenant" }), "payload-tenant");
+  assert.strictEqual(resolveTenantId({}), null);
+});
