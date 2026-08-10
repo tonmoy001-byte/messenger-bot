@@ -69,6 +69,7 @@ function buildOrderKey(uid, items, extra = {}) {
 
   const payload = JSON.stringify({
     uid: String(uid || ""),
+    tenant_id: String(extra.tenant_id || ""),
     items: normalizedItems,
     phone: (extra.customerPhone || extra.phone || "").replace(/\D/g, ""),
     address: (extra.deliveryAddress || extra.address || "").trim().toLowerCase().slice(0, 120),
