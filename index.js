@@ -81,6 +81,7 @@ const { makeRequireRole } = require("./utils/rbac");
 const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
 const { registerHealthRoutes } = require("./src/routes/health");
 const { registerOrderRoutes } = require("./src/routes/orders");
+const { registerChatRoutes } = require("./src/routes/chat");
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard");
@@ -142,6 +143,17 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "landing")));
 
 registerOrderRoutes(app);
+
+registerChatRoutes(app, {
+  chatLimiter,
+  generateReply,
+  upsertUser,
+  saveMessage,
+  io,
+  extractAdContext,
+  trackAdClick,
+  Settings,
+});
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -791,33 +803,6 @@ app.post("/api/admin/team/invite", adminLimiter, authenticateAdmin, requireAdmin
 app.delete("/api/admin/team/:id", adminLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
   try { await Admin.findByIdAndDelete(req.params.id); res.json({ success: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── WEBSITE CHAT ENDPOINT ────────────────────────────────
-app.post("/api/chat", chatLimiter, async (req, res) => {
-  const { message, userId, mediaData, referral } = req.body;
-  if (!message && !mediaData) return res.status(400).json({ error: "Message or image is required" });
-  const senderId = userId || "web-user-" + Math.random().toString(36).substring(7);
-  console.log(` [Web Chat] ${senderId}: "${message || "[Image]"}"`);
-  try {
-    await upsertUser(senderId, "web");
-    await saveMessage(senderId, "user", message || "[Image]");
-    io.emit("new_message", { uid: senderId, role: "user", content: message || "[Image]", timestamp: new Date() });
-    
-    // Ad tracking for web chat
-    const adContext = extractAdContext(referral);
-    if (adContext) {
-      await trackAdClick(senderId, "web", adContext, message);
-    }
-    
-    let settings = await Settings.findOne({ configId: "global" });
-    if (!settings) settings = { autoReply: true };
-    if (!settings.autoReply) return res.json({ reply: "Auto-reply is off.", userId: senderId });
-    const reply = await generateReply(senderId, message, mediaData, "Web User", adContext);
-    await saveMessage(senderId, "model", reply);
-    io.emit("new_message", { uid: senderId, role: "model", content: reply, timestamp: new Date() });
-    res.json({ reply, userId: senderId });
-  } catch (err) { console.error(" Web Chat Error:", err.message); res.status(500).json({ error: "Internal Server Error" }); }
 });
 
 // ─── MESSENGER HANDLER ────────────────────────────────────
