@@ -80,6 +80,7 @@ const { handleTokenRevocation } = require("./utils/tokenManager");
 const { makeRequireRole } = require("./utils/rbac");
 const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
 const { registerHealthRoutes } = require("./src/routes/health");
+const { registerOrderRoutes } = require("./src/routes/orders");
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard");
@@ -91,6 +92,7 @@ const server = http.createServer(app);
 
 // Public health endpoints (available whether started via index.js or src/server.js)
 registerHealthRoutes(app);
+registerOrderRoutes(app);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()).filter(Boolean)
@@ -1428,43 +1430,6 @@ app.put("/api/admin/products/:id/restore", adminLimiter, authenticateAdmin, asyn
     console.log(`[Admin] Product restored: ${product.name} (ID: ${product.id})`);
     res.json({ success: true, product: await Product.findOne({ id: req.params.id }) });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Orders API (for AI order flow) — Redis-backed idempotency via createOrderSafe
-app.post("/api/orders/from-ai", async (req, res) => {
-  try {
-    const { uid, customerName, customerPhone, items, deliveryAddress, notes } = req.body;
-    if (!uid || !items || items.length === 0) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    const { createOrderSafe } = require("./utils/createOrderSafe");
-    const result = await createOrderSafe(uid, {
-      customerName,
-      customerPhone,
-      items,
-      deliveryAddress,
-      notes,
-    });
-
-    if (!result.success) {
-      return res.status(500).json({ error: result.error || "Order creation failed" });
-    }
-
-    if (result.duplicate) {
-      return res.status(409).json({
-        success: true,
-        duplicate: true,
-        orderId: result.orderId,
-        order: result.order,
-      });
-    }
-
-    res.json({ success: true, orderId: result.orderId, order: result.order });
-  } catch (err) {
-    console.error(" [Orders API] Error:", err.message);
-    res.status(500).json({ error: err.message });
-  }
 });
 
 // ─── KNOWLEDGE BASE API ────────────────────────────────────
