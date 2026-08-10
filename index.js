@@ -144,17 +144,6 @@ app.use(express.static(path.join(__dirname, "landing")));
 
 registerOrderRoutes(app);
 
-registerChatRoutes(app, {
-  chatLimiter,
-  generateReply,
-  upsertUser,
-  saveMessage,
-  io,
-  extractAdContext,
-  trackAdClick,
-  Settings,
-});
-
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigins.length > 0) {
@@ -176,6 +165,17 @@ app.use((req, res, next) => {
     return res.sendStatus(200);
   }
   next();
+});
+
+registerChatRoutes(app, {
+  chatLimiter,
+  generateReply,
+  upsertUser,
+  saveMessage,
+  io,
+  extractAdContext,
+  trackAdClick,
+  Settings,
 });
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────
