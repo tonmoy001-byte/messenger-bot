@@ -29,3 +29,33 @@ test("buildOrderKey without tenant_id stays backward compatible", () => {
   const b = buildOrderKey("u1", items, { tenant_id: "" });
   assert.strictEqual(a, b);
 });
+
+const { findRecentDuplicateOrder } = require("../utils/orderIdempotency");
+
+test("findRecentDuplicateOrder passes tenant_id into the query filter", async () => {
+  const calls = [];
+  const fakeModel = {
+    find(filter) {
+      calls.push(filter);
+      const chain = { sort: () => chain, limit: () => chain };
+      return chain;
+    },
+  };
+  await findRecentDuplicateOrder(fakeModel, "u1", 100, { tenant_id: "tenant-a", windowMs: 5000 });
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].tenant_id, "tenant-a");
+});
+
+test("findRecentDuplicateOrder stays backward compatible with numeric windowMs", async () => {
+  const calls = [];
+  const fakeModel = {
+    find(filter) {
+      calls.push(filter);
+      const chain = { sort: () => chain, limit: () => chain };
+      return chain;
+    },
+  };
+  await findRecentDuplicateOrder(fakeModel, "u1", 100, 5000);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].tenant_id, undefined);
+});
