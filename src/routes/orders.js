@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const { createOrderSafe } = require("../../utils/createOrderSafe");
 const { runWithTenantContext, getTenantContext } = require("../../utils/tenantContext");
 
@@ -7,22 +8,25 @@ function requireOrderApiAuth(req, res, next) {
     req.headers["x-internal-order-secret"] ||
     req.headers["X-Internal-Order-Secret"];
 
-  if (internalSecret && provided && provided === internalSecret) {
-    req.orderAuth = { type: "internal" };
-    return next();
+  if (internalSecret && provided && typeof provided === "string") {
+    const a = Buffer.from(internalSecret);
+    const b = Buffer.from(provided);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      req.orderAuth = { type: "internal" };
+      return next();
+    }
   }
 
-  // Fall back to admin JWT auth (same middleware used by dashboard)
-  let authenticateAdmin;
+  let authenticateTenant;
   try {
     const auth = require("../middleware/auth");
-    authenticateAdmin = auth.authenticateTenant || auth.authenticateAdmin;
+    authenticateTenant = auth.authenticateTenant || auth.authenticateAdmin;
   } catch (_) {
-    authenticateAdmin = null;
+    authenticateTenant = null;
   }
 
-  if (typeof authenticateAdmin === "function") {
-    return authenticateAdmin(req, res, () => {
+  if (typeof authenticateTenant === "function") {
+    return authenticateTenant(req, res, () => {
       req.orderAuth = { type: "jwt", tenant_id: req.tenant_id || null };
       next();
     });
@@ -39,7 +43,6 @@ function registerOrderRoutes(app) {
     throw new Error("registerOrderRoutes requires an Express app");
   }
 
-  // Avoid double-registration
   if (app.__orderRoutesRegistered) return;
   app.__orderRoutesRegistered = true;
 
@@ -59,7 +62,6 @@ function registerOrderRoutes(app) {
         return res.status(400).json({ error: "Missing required fields" });
       }
 
-      // Prefer ALS tenant from JWT; for internal secret allow body tenant_id
       const ctx = getTenantContext();
       let tenant_id =
         (ctx && ctx.tenant_id) ||
