@@ -92,7 +92,6 @@ const server = http.createServer(app);
 
 // Public health endpoints (available whether started via index.js or src/server.js)
 registerHealthRoutes(app);
-registerOrderRoutes(app);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim()).filter(Boolean)
@@ -141,6 +140,8 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, "landing")));
+
+registerOrderRoutes(app);
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
