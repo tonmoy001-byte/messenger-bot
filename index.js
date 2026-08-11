@@ -14,6 +14,8 @@ const { encrypt, decrypt, verifyMetaSignature } = require("./src/utils/security"
 const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./src/config/db");
 
 const { runWithTenantContext } = require("./utils/tenantContext");
+const SUPERADMIN_CONTEXT = { role: "superadmin", isSuperAdmin: true, tenant_id: null };
+const withSuperadmin = (fn) => runWithTenantContext(SUPERADMIN_CONTEXT, fn);
 const channelCache = require("./utils/channelCache");
 
 async function verifyWebhookToken(req, platform, globalToken) {
@@ -81,7 +83,7 @@ const { makeRequireRole } = require("./utils/rbac");
 const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken");
 const { registerHealthRoutes } = require("./src/routes/health");
 const { registerOrderRoutes } = require("./src/routes/orders");
-const { registerChatRoutes } = require("./src/routes/chat");
+const { registerChatRoutes, resolveTenantFromRequest } = require("./src/routes/chat");
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard");
@@ -236,11 +238,11 @@ app.post("/api/auth/signup", authLimiter, authenticateAdmin, requireAdmin, async
 app.post("/api/auth/login", authLimiter, async (req, res) => {
   const { username, password } = req.body;
   try {
-    const admin = await Admin.findOne({ username });
+    const admin = await withSuperadmin(() => Admin.findOne({ username }));
     if (!admin) return res.status(401).json({ error: "Invalid credentials" });
     const valid = await bcrypt.compare(password, admin.password);
     if (!valid) return res.status(401).json({ error: "Invalid credentials" });
-    await Admin.findByIdAndUpdate(admin.id, { lastLoginAt: new Date() });
+    await withSuperadmin(() => Admin.findByIdAndUpdate(admin.id, { lastLoginAt: new Date() }));
     const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null }, JWT_SECRET, { expiresIn: "24h" });
     res.cookie("admin_token", token, {
       httpOnly: true,
@@ -270,7 +272,7 @@ app.post("/api/auth/refresh", authLimiter, async (req, res) => {
     if (!match) return res.status(401).json({ error: "No refresh token" });
     const decoded = verifyRefreshToken(match[1], JWT_SECRET);
     if (!decoded || !decoded.id) return res.status(401).json({ error: "Invalid refresh token" });
-    const admin = await Admin.findOne({ id: decoded.id });
+    const admin = await withSuperadmin(() => Admin.findOne({ id: decoded.id }));
     if (!admin) return res.status(401).json({ error: "User not found" });
     const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role, tenant_id: admin.tenant_id || null }, JWT_SECRET, { expiresIn: "24h" });
     res.cookie("admin_token", token, {
@@ -1314,14 +1316,22 @@ app.delete("/api/admin/ads/:adId", adminLimiter, authenticateAdmin, requireAdmin
 
 // ─── PUBLIC API ROUTES ─────────────────────────────────────
 // Products API
-app.get("/api/products", async (req, res) => {
+async function withPublicTenant(req, res, next) {
+  const tenantInfo = await resolveTenantFromRequest(req);
+  if (!tenantInfo || !tenantInfo.tenant_id) {
+    return res.status(400).json({ error: "tenant required: pass ?tenant= or X-Tenant-ID header" });
+  }
+  return runWithTenantContext({ tenant_id: tenantInfo.tenant_id, role: "admin" }, next);
+}
+
+app.get("/api/products", withPublicTenant, async (req, res) => {
   try {
     const products = await Product.find({ isActive: true }).sort({ category: 1, createdAt: -1 });
     res.json(products);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get("/api/products/category/:category", async (req, res) => {
+app.get("/api/products/category/:category", withPublicTenant, async (req, res) => {
   try {
     const products = await Product.find({ category: req.params.category, isActive: true });
     res.json(products);
@@ -1715,10 +1725,12 @@ async function startServer() {
   await nextApp.prepare();
   console.log(" Dashboard (Next.js) ready");
   await connectDB();
-  await initAdmin();
-  await initSettings();
-  await seedProducts();
-  await initTemplates();
+  await withSuperadmin(async () => {
+    await initAdmin();
+    await initSettings();
+    await seedProducts();
+    await initTemplates();
+  });
   await initRAG();
   startAutoPurgeCron();
   console.log(`\n${"─".repeat(50)}`);

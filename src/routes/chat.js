@@ -11,7 +11,7 @@
  */
 const { runWithTenantContext } = require("../../utils/tenantContext");
 
-async function resolveWebChatTenant(req) {
+async function resolveTenantFromRequest(req) {
   const { Tenant } = require("../config/db");
   const body = req.body || {};
   const headers = req.headers || {};
@@ -76,6 +76,8 @@ async function resolveWebChatTenant(req) {
 
   return null;
 }
+
+const resolveWebChatTenant = resolveTenantFromRequest;
 
 /**
  * @param {import('express').Express} app
@@ -179,4 +181,5 @@ function registerChatRoutes(app, deps) {
 module.exports = {
   registerChatRoutes,
   resolveWebChatTenant,
+  resolveTenantFromRequest,
 };
