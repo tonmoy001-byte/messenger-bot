@@ -104,10 +104,12 @@ async function getProducts(category = null) {
   }
 }
 
-async function createOrder(uid, orderData) {
+async function createOrder(uid, orderData, tenant_id = null) {
   // Use Redis-backed idempotent path (no HTTP self-call)
   const { createOrderSafe } = require("./createOrderSafe");
-  const result = await createOrderSafe(uid, orderData);
+  const payload = { ...orderData };
+  if (tenant_id) payload.tenant_id = tenant_id;
+  const result = await createOrderSafe(uid, payload);
   if (!result || result.success === false) {
     console.error("❌ Failed to create order:", result?.error || "unknown");
     return null;
@@ -155,7 +157,7 @@ async function processOrderFlow(uid, userMessage, userName, tenant_id = null) {
     case FLOW_STATE.GETTING_QUANTITY: return await handleQuantity(uid, userMessage, { ...data, products });
     case FLOW_STATE.GETTING_ADDRESS: return await handleAddress(uid, userMessage, { ...data, products });
     case FLOW_STATE.GETTING_PHONE: return await handlePhone(uid, userMessage, { ...data, products }, userName);
-    case FLOW_STATE.CONFIRMING: return await handleConfirmation(uid, userMessage, { ...data, products });
+    case FLOW_STATE.CONFIRMING: return await handleConfirmation(uid, userMessage, { ...data, products }, tenant_id);
     default: await clearFlowState(uid); return null;
   }
 }
@@ -427,7 +429,7 @@ async function handlePhone(uid, userMessage, data, userName) {
   };
 }
 
-async function handleConfirmation(uid, userMessage, data) {
+async function handleConfirmation(uid, userMessage, data, tenant_id = null) {
   const intent = parseOrderIntent(userMessage);
 
   if (intent.intent === "confirm" || userMessage.toLowerCase().trim() === "yes" || userMessage.toLowerCase().trim() === "confirm") {
@@ -502,7 +504,7 @@ async function handleConfirmation(uid, userMessage, data) {
         }],
         deliveryAddress: data.deliveryAddress,
         notes: `Ordered via ${selectedProduct.category}`
-      });
+      }, tenant_id);
     }
 
     if (orderResult && orderResult.success) {

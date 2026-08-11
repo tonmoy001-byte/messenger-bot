@@ -69,6 +69,7 @@ function buildOrderKey(uid, items, extra = {}) {
 
   const payload = JSON.stringify({
     uid: String(uid || ""),
+    tenant_id: String(extra.tenant_id || ""),
     items: normalizedItems,
     phone: (extra.customerPhone || extra.phone || "").replace(/\D/g, ""),
     address: (extra.deliveryAddress || extra.address || "").trim().toLowerCase().slice(0, 120),
@@ -140,15 +141,31 @@ async function markOrderCreated(orderKey, orderId) {
   }
 }
 
-async function findRecentDuplicateOrder(OrderModel, uid, totalAmount, windowMs = 120000) {
+async function findRecentDuplicateOrder(OrderModel, uid, totalAmount, opts = {}) {
   if (!OrderModel || !uid) return null;
+
+  // Backward-compatible: old callers passed windowMs as 4th arg (number)
+  let windowMs = 120000;
+  let tenant_id = null;
+  if (typeof opts === "number") {
+    windowMs = opts;
+  } else if (opts && typeof opts === "object") {
+    if (typeof opts.windowMs === "number") windowMs = opts.windowMs;
+    if (opts.tenant_id) tenant_id = String(opts.tenant_id);
+  }
+
   try {
     const since = new Date(Date.now() - windowMs);
-    const recent = await OrderModel.find({
+    const filter = {
       uid,
       totalAmount,
       createdAt: { $gte: since },
-    })
+    };
+    if (tenant_id) {
+      filter.tenant_id = tenant_id;
+    }
+
+    const recent = await OrderModel.find(filter)
       .sort({ createdAt: -1 })
       .limit(5);
 

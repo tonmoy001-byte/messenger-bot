@@ -11,6 +11,7 @@ A Node.js/Express multi-channel chatbot that uses **Groq (Qwen)** with **Gemini 
 - 🛒 **Order Management**: AI-guided ordering with product catalog, payments (bKash/Nagad), WooCommerce/Shopify
 - 📊 **Real-Time Dashboard**: Next.js 16 (App Router) admin panel with analytics
 - 🔐 **RBAC/Multi-Tenant Security**: JWT auth, role-based access, tenant isolation
+  > **Status:** Multi-tenant isolation is partial on `master`. Phase 0 (protected order API, tenant-scoped web chat, tenant-aware order creation) lands first; full table coverage is tracked in `docs/ROADMAP.md`.
 - 🧠 **Context-Aware**: Per-user conversation history, RAG knowledge base
 - 🔄 **Reliable Delivery**: BullMQ queues, idempotency, retry + dead-letter queue
 - ⚙️ **Live Updates**: Socket.io for real-time dashboard updates
