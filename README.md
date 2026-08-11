@@ -114,13 +114,20 @@ BOOTSTRAP_ADMIN=false
 ADMIN_PASSWORD=
 ```
 
-Run the Supabase schema migration first:
+Run the Supabase schema migrations in order:
 
 ```bash
 psql "$SUPABASE_URL" -f migration.sql
+psql "$SUPABASE_URL" -f migration-phase1-tenant-columns.sql
 ```
 
-> **Important:** The migration only adds multi-tenant columns. Your core tables (users, orders, products, etc.) must already exist or be created separately.
+### Migrations
+Apply in order:
+1. `migration.sql` — core schema + initial tenant columns
+2. `migration-phase1-tenant-columns.sql` — tenant_id columns for the remaining tenant-owned tables
+3. `node scripts/backfill-tenant-settings.js` — copy global settings into per-tenant rows (idempotent)
+
+> **Important:** `migration.sql` only adds multi-tenant columns. Your core tables (users, orders, products, etc.) must already exist or be created separately. The phase1 migration is idempotent (ALTER/INDEX only) but must run after `migration.sql`.
 
 ### 3. Start the server
 
