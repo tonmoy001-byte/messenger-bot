@@ -17,9 +17,9 @@ const { runWithTenantContext } = require("./utils/tenantContext");
 const channelCache = require("./utils/channelCache");
 
 const { generateReply } = require("./src/services/ai/gemini");
-const { sendMessage, sendTyping, getUserProfile, downloadExternalMedia } = require("./messenger");
+const { sendMessage, sendTyping, getUserProfile, downloadExternalMedia } = require("./src/services/channels/messenger");
 const { sendWhatsAppMessage, markWhatsAppAsRead, downloadWhatsAppMedia, isWithin24HourWindow } = require("./src/services/channels/whatsapp");
-const { sendInstagramMessage, sendInstagramTyping, downloadInstagramMedia, getInstagramUserProfile } = require("./instagram");
+const { sendInstagramMessage, sendInstagramTyping, downloadInstagramMedia, getInstagramUserProfile } = require("./src/services/channels/instagram");
 const { createBkashPayment, executeBkashPayment, createNagadPayment, markCOD } = require("./utils/payments");
 const { matchProducts, buildMatchResponse } = require("./utils/imageMatcher");
 const { detectComplaint } = require("./utils/complaintDetector");
