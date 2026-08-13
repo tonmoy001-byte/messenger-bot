@@ -7,7 +7,7 @@
  */
 
 const axios = require("axios");
-const { getInstagramToken } = require("./utils/tokenManager");
+const { getInstagramToken } = require("../../../utils/tokenManager");
 
 const INSTAGRAM_API_BASE = "https://graph.facebook.com/v19.0";
 

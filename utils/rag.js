@@ -9,6 +9,7 @@
 
 const { generateEmbedding } = require("./embeddings");
 const { queryVectors, upsertVectors, deleteVectors } = require("./vectorDB");
+const { getTenantContext } = require("./tenantContext");
 const { KnowledgeBase } = require("../src/config/db");
 const { formatVectorContext, formatKeywordContext } = require("./ragFormat");
 
@@ -19,12 +20,13 @@ const { formatVectorContext, formatKeywordContext } = require("./ragFormat");
  * @returns {Promise<string>} - Formatted context string
  */
 async function retrieveContext(query, sourceFilter = null) {
+  const ctx = getTenantContext();
   try {
     // Try vector search first
     const queryEmbedding = await generateEmbedding(query);
     if (queryEmbedding) {
       const filter = sourceFilter ? { source: sourceFilter } : {};
-      const matches = await queryVectors(queryEmbedding, filter);
+      const matches = await queryVectors(queryEmbedding, filter, ctx ? ctx.tenant_id : null);
 
       if (matches.length > 0) {
         const contexts = formatVectorContext(matches);
@@ -33,6 +35,8 @@ async function retrieveContext(query, sourceFilter = null) {
     }
 
     // Fallback: direct text search against Supabase knowledge base
+    if (!ctx || !ctx.tenant_id) return "";
+
     const queryLower = query.toLowerCase();
     const keywords = queryLower.split(/\s+/).filter(w => w.length > 2);
 
@@ -41,7 +45,8 @@ async function retrieveContext(query, sourceFilter = null) {
     const { data: entries, error } = await KnowledgeBase.client
       .from("knowledge_base")
       .select("title, content, category")
-      .eq("isActive", true);
+      .eq("isActive", true)
+      .eq("tenant_id", ctx.tenant_id);
 
     if (error || !entries || entries.length === 0) return "";
 
@@ -79,6 +84,7 @@ async function indexKnowledgeEntry(entry) {
         title: entry.title || "",
         category: entry.category || "",
         tags: (entry.tags || []).join(", "),
+        tenant_id: entry.tenant_id || null,
         updatedAt: entry.updatedAt?.toISOString() || new Date().toISOString()
       }
     }];

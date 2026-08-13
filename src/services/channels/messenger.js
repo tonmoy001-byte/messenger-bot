@@ -9,8 +9,8 @@
 
 require("dotenv").config();
 const axios = require("axios");
-const { getMessengerToken } = require("./utils/tokenManager");
-const { withRetry } = require("./utils/retry");
+const { getMessengerToken } = require("../../../utils/tokenManager");
+const { withRetry } = require("../../../utils/retry");
 
 const MESSENGER_API = "https://graph.facebook.com/v19.0/me/messages";
 

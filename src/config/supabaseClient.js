@@ -9,6 +9,8 @@
 const { createClient } = require("@supabase/supabase-js");
 const { getTenantContext } = require("../../utils/tenantContext");
 require("dotenv").config();
+// Load env config so test-mode placeholder vars are set before the FATAL check.
+require("./env");
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY;
@@ -30,8 +32,43 @@ const MULTI_TENANT_TABLES = [
   "knowledge_base",
   "messages",
   "integrations",
-  "tenant_channels"
+  "tenant_channels",
+  "settings",
+  "order_sessions",
+  "payments",
+  "broadcasts",
+  "templates",
+  "ecommerce_connections",
+  "feedback",
+  "conversation_analytics",
+  "ads",
+  "ad_clicks"
 ];
+
+// Registry/mapping tables legitimately queried before a tenant context exists.
+// ("tenants" is NOT in MULTI_TENANT_TABLES — it is special-cased in applyFilter;
+//  "tenant_channels" is in MULTI_TENANT_TABLES but allowlisted here.)
+const ALLOWLIST_TABLES = ["tenants", "tenant_channels"];
+
+class TenantContextError extends Error {
+  constructor(tableName) {
+    super(`Missing tenant context: query on "${tableName}" requires a tenant context`);
+    this.name = "TenantContextError";
+    this.statusCode = 500;
+  }
+}
+
+function requireTenantScope(tableName) {
+  if (!MULTI_TENANT_TABLES.includes(tableName)) return;
+  if (ALLOWLIST_TABLES.includes(tableName)) return;
+  const ctx = getTenantContext();
+  if (ctx && ctx.tenant_id) return;
+  if (ctx && ctx.isSuperAdmin) return;
+  if (process.env.NODE_ENV === "production") {
+    throw new TenantContextError(tableName);
+  }
+  console.warn(`[TenantScope] ${tableName} queried without tenant context (dev mode)`);
+}
 
 /**
  * Convert value to ISO string if it's a Date object.
@@ -54,6 +91,7 @@ function toPostgrestColumn(key) {
 }
 
 function applyFilter(query, filter, tableName) {
+  requireTenantScope(tableName);
   // Apply tenant scoping & soft-delete filtering first
   const ctx = getTenantContext();
   if (ctx && ctx.tenant_id) {
@@ -280,6 +318,7 @@ class Model {
    * findByIdAndUpdate(id, update, options)
    */
   async findByIdAndUpdate(id, update, options = {}) {
+    requireTenantScope(this.tableName);
     const updateData = buildUpdateData(update);
     const { _increments, ...setFields } = updateData;
     const { new: returnNew = true } = options;
@@ -320,6 +359,7 @@ class Model {
    * findByIdAndDelete(id) -> Maps to Soft Delete
    */
   async findByIdAndDelete(id) {
+    requireTenantScope(this.tableName);
     const ctx = getTenantContext();
     if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
       const { data, error } = await this.client
@@ -342,6 +382,7 @@ class Model {
    * new Model({ ... }).save()
    */
   async save(doc) {
+    requireTenantScope(this.tableName);
     const ctx = getTenantContext();
     if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
       doc.tenant_id = ctx.tenant_id;
@@ -355,6 +396,7 @@ class Model {
    * insertMany([ { ... }, { ... } ])
    */
   async insertMany(docs) {
+    requireTenantScope(this.tableName);
     const ctx = getTenantContext();
     if (ctx && ctx.tenant_id && MULTI_TENANT_TABLES.includes(this.tableName)) {
       for (const doc of docs) {
@@ -857,4 +899,9 @@ module.exports = {
   AdClick,
   Tenant,
   TenantChannel,
+  MULTI_TENANT_TABLES,
+  ALLOWLIST_TABLES,
+  requireTenantScope,
+  TenantContextError,
+  applyFilter,
 };

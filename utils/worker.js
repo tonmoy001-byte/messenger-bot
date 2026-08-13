@@ -8,9 +8,9 @@
  */
 
 const { generateReply } = require("../src/services/ai/gemini");
-const { sendMessage: sendMessenger, sendTyping } = require("../messenger");
+const { sendMessage: sendMessenger, sendTyping } = require("../src/services/channels/messenger");
 const { sendWhatsAppMessage, markWhatsAppAsRead } = require("../src/services/channels/whatsapp");
-const { sendInstagramMessage, sendInstagramTyping } = require("../instagram");
+const { sendInstagramMessage, sendInstagramTyping } = require("../src/services/channels/instagram");
 const { saveMessage } = require("../src/config/db");
 const { isWithinMessagingWindow, sendViaTagIfExpired } = require("./messagingWindow");
 

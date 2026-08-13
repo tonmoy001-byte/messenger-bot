@@ -67,16 +67,19 @@ async function upsertVectors(vectors) {
  * @param {object} filter - Optional metadata filter
  * @returns {Array} - Top matching results
  */
-async function queryVectors(queryVector, filter = {}) {
+async function queryVectors(queryVector, filter = {}, tenantId = null) {
   const idx = await initPinecone();
   if (!idx) return [];
+
+  const finalFilter = { ...filter };
+  if (tenantId) finalFilter.tenant_id = tenantId;
 
   try {
     const response = await idx.namespace(NAMESPACE).query({
       vector: queryVector,
       topK: TOP_K,
       includeMetadata: true,
-      filter: Object.keys(filter).length > 0 ? filter : undefined
+      filter: Object.keys(finalFilter).length > 0 ? finalFilter : undefined
     });
 
     return response.matches || [];
