@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const { encrypt } = require("../utils/security");
 const { Admin, Integration } = require("../config/db");
-const { signRefreshToken, verifyRefreshToken } = require("../utils/refreshToken");
+const { signRefreshToken, verifyRefreshToken } = require("../../utils/refreshToken");
 const { requireEnv } = require("../config/env");
 const { withSuperadmin } = require("../config/superadmin");
 
