@@ -14,49 +14,7 @@ const { encrypt, decrypt, verifyMetaSignature } = require("./src/utils/security"
 const { connectDB, User, Message, Admin, Order, Product, Settings, Integration, OrderSession, Payment, Broadcast, Template, EcommerceConnection, KnowledgeBase, Feedback, ConversationAnalytics, Ad, AdClick, Tenant, TenantChannel } = require("./src/config/db");
 
 const { runWithTenantContext } = require("./utils/tenantContext");
-const SUPERADMIN_CONTEXT = { role: "superadmin", isSuperAdmin: true, tenant_id: null };
-const withSuperadmin = (fn) => runWithTenantContext(SUPERADMIN_CONTEXT, fn);
 const channelCache = require("./utils/channelCache");
-
-async function verifyWebhookToken(req, platform, globalToken) {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-
-  if (mode !== "subscribe") return false;
-
-  const tenantSlug = req.query.tenant;
-  const reqPlatform = req.query.platform || platform;
-
-  if (tenantSlug) {
-    const tenant = await Tenant.findOne({ slug: tenantSlug });
-    if (!tenant) return false;
-
-    const channel = await TenantChannel.findOne({ tenant_id: tenant.id, platform: reqPlatform });
-    if (!channel || channel.deleted_at) return false;
-
-    return token === channel.verifyToken;
-  }
-
-  const fallbackToken = process.env.META_WEBHOOK_VERIFY_TOKEN || globalToken || process.env.VERIFY_TOKEN;
-  return token === fallbackToken;
-}
-
-async function getTenantByChannel(platform, externalId) {
-  const cached = channelCache.get(platform, externalId);
-  if (cached) return cached;
-
-  const channel = await TenantChannel.findOne({ platform, externalId, deleted_at: null });
-  if (channel) {
-    const data = {
-      tenant_id: channel.tenant_id,
-      verifyToken: channel.verifyToken,
-      accessToken: channel.accessToken,
-    };
-    channelCache.set(platform, externalId, data);
-    return data;
-  }
-  return null;
-}
 
 const { generateReply } = require("./src/services/ai/gemini");
 const { sendMessage, sendTyping, getUserProfile, downloadExternalMedia } = require("./messenger");
@@ -84,6 +42,9 @@ const { signRefreshToken, verifyRefreshToken } = require("./utils/refreshToken")
 const { registerHealthRoutes } = require("./src/routes/health");
 const { registerOrderRoutes } = require("./src/routes/orders");
 const { registerChatRoutes, resolveTenantFromRequest } = require("./src/routes/chat");
+const { withSuperadmin } = require("./src/config/superadmin");
+const { verifyWebhookToken, getTenantByChannel } = require("./src/utils/webhookHelpers");
+const { upsertUser, saveMessage } = require("./src/utils/messageHelpers");
 
 const dev = process.env.NODE_ENV !== "production";
 const dashboardDir = path.join(__dirname, "dashboard");
@@ -185,19 +146,6 @@ const { authenticateTenant } = require("./src/middleware/auth");
 const authenticateAdmin = authenticateTenant;
 
 const requireAdmin = makeRequireRole("admin");
-
-// ─── HELPER FUNCTIONS ─────────────────────────────────────
-async function upsertUser(uid, platform, name = null, profilePic = null) {
-  await User.findOneAndUpdate(
-    { uid },
-    { $set: { platform, name: name || null, profilePic: profilePic || null, lastSeen: new Date() } },
-    { upsert: true, new: true }
-  );
-}
-
-async function saveMessage(uid, role, content, mediaUrl = null, platform = "messenger") {
-  await Message.save({ uid, role, content, mediaUrl, platform, timestamp: new Date() });
-}
 
 // ─── AUTH ROUTES ──────────────────────────────────────────
 app.post("/api/auth/signup", authLimiter, authenticateAdmin, requireAdmin, async (req, res) => {
