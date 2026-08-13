@@ -57,3 +57,81 @@ test("Settings.save injects tenant_id under tenant context", async () => {
   });
   assert.strictEqual(lastQuery.insert.tenant_id, "tenant-s");
 });
+
+test("all Settings call sites run under tenant context", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const root = path.join(__dirname, "..");
+
+  // Tenant-scoping contract for every module that touches Settings:
+  //  1. Route files that read/write Settings must establish tenant context
+  //     themselves — either via the authenticateAdmin/authenticateTenant middleware
+  //     (admin APIs; the middleware wraps the handler in runWithTenantContext) or by
+  //     wrapping the handler in runWithTenantContext (public web-chat API).
+  //  2. The webhook entry point must wrap every channel-handler invocation in
+  //     runWithTenantContext. That wrapper is what scopes the whole channel path
+  //     (messageHandlers.js, channel adapters, and the helper modules below), so
+  //     those files are not required to establish context themselves.
+  //  3. Helper modules that touch Settings may only be imported from that
+  //     tenant-scoped channel path, the webhook entry, or the superadmin-scoped
+  //     server init — never from unscoped route code.
+  const routeFiles = [
+    "src/routes/admin.js",
+    "src/routes/chat.js",
+  ];
+  const helperFiles = [
+    "utils/tokenManager.js",
+    "utils/whatsappTemplates.js",
+  ];
+
+  const problems = [];
+
+  for (const rel of routeFiles) {
+    const src = fs.readFileSync(path.join(root, rel), "utf8");
+    if (!/(authenticateAdmin|authenticateTenant|runWithTenantContext)/.test(src)) {
+      problems.push(`${rel}: Settings accessed but no tenant-context mechanism in file`);
+    }
+  }
+
+  // Webhook entry points must wrap channel handling in tenant context.
+  const webhooks = fs.readFileSync(path.join(root, "src/routes/webhooks.js"), "utf8");
+  if (!/runWithTenantContext/.test(webhooks)) {
+    problems.push("src/routes/webhooks.js: no runWithTenantContext");
+  }
+
+  // Helpers that touch Settings are only safe if every importer lives on the
+  // tenant-scoped channel path or the superadmin-scoped init path.
+  const allowedImporters = [
+    /^src\/services\/channels\//,
+    /^src\/routes\/webhooks\.js$/,
+    /^src\/server\.js$/,
+    /^utils\//,
+    /^tests\//,
+  ];
+  for (const rel of helperFiles) {
+    const moduleName = rel.split(/[\\/]/).pop().replace(/\.js$/, "");
+    for (const importer of findHelperImporters(root, moduleName)) {
+      if (!allowedImporters.some((re) => re.test(importer))) {
+        problems.push(`${importer}: imports ${rel} outside the tenant-scoped surface`);
+      }
+    }
+  }
+
+  assert.deepStrictEqual(problems, []);
+
+  function findHelperImporters(root, moduleName) {
+    const importers = [];
+    const requireRe = new RegExp(`require\\(["'][^"']*\\/?${moduleName}(?:\\.js)?["']\\)`);
+    function walk(dir) {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".js") && requireRe.test(fs.readFileSync(full, "utf8"))) {
+          importers.push(path.relative(root, full).split(path.sep).join("/"));
+        }
+      }
+    }
+    for (const dir of ["src", "utils", "tests"]) walk(path.join(root, dir));
+    return importers;
+  }
+});
