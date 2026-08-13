@@ -17,6 +17,24 @@ const JWT_SECRET = requireEnv("JWT_SECRET", {
   forbid: ["cyberbot-admin-secret-key-change-in-production", "your_jwt_secret_key"]
 });
 
+/**
+ * Upsert Meta page integrations from the OAuth callback.
+ * Runs inside a superadmin tenant context because this callback is invoked by
+ * Meta (no admin session) and "integrations" is in MULTI_TENANT_TABLES — the
+ * tenant-scope guard would otherwise throw in production.
+ */
+async function upsertMetaIntegrations(pages, longToken) {
+  return withSuperadmin(async () => {
+    for (const page of pages || []) {
+      await Integration.findOneAndUpdate(
+        { type: "facebook", externalId: page.id },
+        { $set: { name: page.name, accessToken: encrypt(longToken), isActive: true, metadata: { longLivedToken: encrypt(longToken) } } },
+        { upsert: true }
+      );
+    }
+  });
+}
+
 function registerAuthRoutes(app, { authLimiter, authenticateAdmin, requireAdmin }) {
   if (!app || typeof app.post !== "function") {
     throw new Error("registerAuthRoutes requires an Express app");
@@ -162,15 +180,8 @@ function registerAuthRoutes(app, { authLimiter, authenticateAdmin, requireAdmin 
       const { access_token: shortToken } = tokenRes.data;
       const longRes = await axios.get(`https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${process.env.FB_APP_ID}&client_secret=${process.env.FB_APP_SECRET}&fb_exchange_token=${shortToken}`);
       const { access_token: longToken } = longRes.data;
-      const encrypted = encrypt(longToken);
       const pagesRes = await axios.get(`https://graph.facebook.com/v19.0/me/accounts?access_token=${longToken}`);
-      for (const page of pagesRes.data.data || []) {
-        await Integration.findOneAndUpdate(
-          { type: "facebook", externalId: page.id },
-          { $set: { name: page.name, accessToken: encrypted, isActive: true, metadata: { longLivedToken: encrypt(longToken) } } },
-          { upsert: true }
-        );
-      }
+      await upsertMetaIntegrations(pagesRes.data.data || [], longToken);
       res.redirect("/?auth=success");
     } catch (err) {
       console.error("Meta OAuth Error:", err.message);
@@ -179,4 +190,4 @@ function registerAuthRoutes(app, { authLimiter, authenticateAdmin, requireAdmin 
   });
 }
 
-module.exports = { registerAuthRoutes };
+module.exports = { registerAuthRoutes, upsertMetaIntegrations };
