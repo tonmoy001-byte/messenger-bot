@@ -146,20 +146,24 @@ test("save is allowed under tenant context in production and injects tenant_id",
   assert.strictEqual(captured[0].tenant_id, "tenant-x");
 });
 
-test("superadmin.js defines withSuperadmin and auth.js wraps login/refresh while index.js wraps bootstrap in it", () => {
+test("auth.js and server.js wrap superadmin-critical operations with withSuperadmin", () => {
   const fs = require("fs");
   const path = require("path");
   const superadminSrc = fs.readFileSync(
     path.join(__dirname, "..", "src", "config", "superadmin.js"), "utf8");
   assert.match(superadminSrc, /(?:const withSuperadmin = .*|function withSuperadmin\([^)]*\)[\s\S]*?)runWithTenantContext/);
-  const authSrc = fs.readFileSync(path.join(__dirname, "..", "src", "routes", "auth.js"), "utf8");
+
+  const authSrc = fs.readFileSync(
+    path.join(__dirname, "..", "src", "routes", "auth.js"), "utf8");
   const login = authSrc.slice(authSrc.indexOf('app.post("/api/auth/login"'), authSrc.indexOf('app.post("/api/auth/refresh"'));
   const refresh = authSrc.slice(authSrc.indexOf('app.post("/api/auth/refresh"'), authSrc.indexOf('app.post("/api/auth/logout"'));
   assert.match(login, /withSuperadmin\(/);
   assert.match(refresh, /withSuperadmin\(/);
-  const src = fs.readFileSync(path.join(__dirname, "..", "index.js"), "utf8");
-  const bootStart = src.indexOf("await withSuperadmin(");
-  const bootstrap = src.slice(bootStart, src.indexOf("startAutoPurgeCron", bootStart));
+
+  const serverSrc = fs.readFileSync(
+    path.join(__dirname, "..", "src", "server.js"), "utf8");
+  const bootStart = serverSrc.indexOf("await withSuperadmin(");
+  const bootstrap = serverSrc.slice(bootStart, serverSrc.indexOf("startAutoPurgeCron", bootStart));
   assert.match(bootstrap, /withSuperadmin\(/);
 });
 
