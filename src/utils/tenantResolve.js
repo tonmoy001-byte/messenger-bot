@@ -7,7 +7,35 @@
  */
 const { Tenant } = require("../config/db");
 
+/**
+ * Widget origin gate for public endpoints (/api/chat, /api/products).
+ * When PUBLIC_WIDGET_ALLOWED_ORIGINS is set (comma-separated hostnames or
+ * origins), only requests whose Origin/Referer host matches pass. Unset keeps
+ * the pre-existing permissive behavior.
+ */
+function isWidgetOriginAllowed(req) {
+  const allowlist = process.env.PUBLIC_WIDGET_ALLOWED_ORIGINS;
+  if (!allowlist || !allowlist.trim()) return true;
+  const allowed = allowlist
+    .split(",")
+    .map((entry) => normalizeOrigin(entry))
+    .filter(Boolean);
+
+  const origin = req.headers && (req.headers.origin || req.headers.referer);
+  if (!origin) return false;
+  const host = normalizeOrigin(origin);
+  return allowed.includes(host);
+}
+
+function normalizeOrigin(value) {
+  const trimmed = String(value).trim().toLowerCase();
+  const withoutScheme = trimmed.replace(/^https?:\/\//, "");
+  const host = withoutScheme.split("/")[0];
+  return host.replace(/:\d+$/, "");
+}
+
 async function resolveTenantFromRequest(req) {
+  if (!isWidgetOriginAllowed(req)) return null;
   const body = req.body || {};
   const headers = req.headers || {};
   const query = req.query || {};
@@ -72,4 +100,4 @@ async function resolveTenantFromRequest(req) {
   return null;
 }
 
-module.exports = { resolveTenantFromRequest };
+module.exports = { resolveTenantFromRequest, isWidgetOriginAllowed };
