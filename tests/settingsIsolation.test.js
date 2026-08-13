@@ -58,7 +58,7 @@ test("Settings.save injects tenant_id under tenant context", async () => {
   assert.strictEqual(lastQuery.insert.tenant_id, "tenant-s");
 });
 
-test("all Settings call sites run under tenant context", () => {
+test("declared tenant-scoped Settings surface carries tenant context", () => {
   const fs = require("fs");
   const path = require("path");
   const root = path.join(__dirname, "..");
@@ -75,6 +75,11 @@ test("all Settings call sites run under tenant context", () => {
   //  3. Helper modules that touch Settings may only be imported from that
   //     tenant-scoped channel path, the webhook entry, or the superadmin-scoped
   //     server init — never from unscoped route code.
+  //  NOTE: this audit covers the declared route/webhook/helper surface above. It
+  //  is NOT proof that every Settings read in the repo is tenant-scoped: BullMQ
+  //  workers (utils/worker.js → utils/messagingWindow.js → tokenManager →
+  //  Settings.findOne, and generateReply at src/services/ai/gemini.js:337) run
+  //  without tenant context — a tracked follow-up, out of scope here.
   const routeFiles = [
     "src/routes/admin.js",
     "src/routes/chat.js",
