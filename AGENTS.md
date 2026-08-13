@@ -9,8 +9,12 @@ Multi-channel AI chatbot SaaS ("Cyberbot") with Messenger, WhatsApp, Instagram, 
 ## Architecture
 
 ```
-index.js              → Express server (port 3000), all API routes, webhook handlers
+index.js              → Thin entry: requires ./src/server (Docker/start-all.js/package.json keep `node index.js`)
+src/server.js         → Single entry: createApp(), init (admin/settings/products/templates/RAG), graceful shutdown
+src/app.js            → Composition root: Express app + HTTP server + Socket.IO, CORS, limiters, registers all routes
+src/routes/*.js       → Route modules (health, orders, chat, auth, integrations, webhooks, admin, ads, products, knowledge)
 src/services/ai/gemini.js → AI provider abstraction (Groq primary, Gemini fallback)
+src/services/channels/ → messageHandlers.js factory + messenger.js/whatsapp.js/instagram.js channel adapters
 src/config/supabaseClient.js → Supabase client + Model adapters
 utils/queue.js        → Bull queue with exponential dedup, retry, DLQ
 utils/retry.js        → Webhook retry queue with dead letter queue
@@ -31,9 +35,28 @@ When working on this project, follow the skill lifecycle:
 1. **Bug fix** → `systematic-debugging` → `test-driven-development` → verify
 2. **New feature** → `writing-plans` → implement → `verification-before-completion`
 3. **UI work** → `ui-ux-pro-max` or `frontend-design` for design; shadcn/ui components already installed
-4. **API changes** → Check existing route patterns in `index.js` before adding
+4. **API changes** → Add/extend route modules in `src/routes/*.js`; register in `src/app.js` (check existing patterns there)
 5. **Security review** → `security-and-hardening` from `agent-skills/`
 6. **Performance** → `performance-optimization` from `agent-skills/`
+
+## Mandatory Skill Gate
+
+**Before changing anything in the codebase (edit, add, delete, or move a file; write or modify any code), you MUST load and follow the relevant skills below. This is not optional.**
+
+Apply the gate in this order:
+
+1. **`brainstorming`** — Always load first for any feature, component, or behavior change. Clarify intent and requirements before writing any code.
+2. **`writing-plans`** — Load for any multi-step task. Produce an explicit plan with verifiable success criteria before touching code.
+3. **`systematic-debugging`** — Load when diagnosing any bug, test failure, or unexpected behavior, before proposing fixes.
+4. **`test-driven-development`** — Load before implementing any feature or bugfix. Write tests first, then implement.
+5. **`security-and-hardening`** — Load for any code that handles user input, auth, credentials, webhooks, or third-party platform callbacks.
+6. **`api-and-interface-design`** — Load when adding or modifying any API route, webhook contract, or module boundary.
+7. **`observability-and-instrumentation`** — Load when adding logging, metrics, or anything that runs in production.
+8. **`performance-optimization`** — Load when changing code that could affect latency, throughput, or load (AI calls, Socket.io, queues, DB queries).
+9. **`ui-ux-pro-max`** — Load for any dashboard/UI change.
+10. **`verification-before-completion`** — Load before claiming any work is done. Run the verification commands and confirm output first.
+
+When multiple skills apply, finish the gate (process skills first: brainstorming → writing-plans → systematic-debugging → test-driven-development — then implementation skills), then follow `verification-before-completion` before declaring success.
 
 ## Key Conventions
 
