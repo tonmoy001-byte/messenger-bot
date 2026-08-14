@@ -95,7 +95,7 @@ export default function ConversationsPage() {
       const res = await fetch(`/api/admin/conversations/${selected.customerId}/handoff`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, platform: selected.platform }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || "Failed to update handoff")

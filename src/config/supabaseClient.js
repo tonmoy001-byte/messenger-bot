@@ -42,7 +42,9 @@ const MULTI_TENANT_TABLES = [
   "feedback",
   "conversation_analytics",
   "ads",
-  "ad_clicks"
+  "ad_clicks",
+  "conversation_handoffs",
+  "conversation_handoff_events"
 ];
 
 // Registry/mapping tables legitimately queried before a tenant context exists.
@@ -876,6 +878,8 @@ const Ad = new Model("ads");
 const AdClick = new Model("ad_clicks");
 const Tenant = new Model("tenants");
 const TenantChannel = new Model("tenant_channels");
+const ConversationHandoff = new Model("conversation_handoffs");
+const ConversationHandoffEvent = new Model("conversation_handoff_events");
 
 module.exports = {
   supabase,
@@ -899,6 +903,8 @@ module.exports = {
   AdClick,
   Tenant,
   TenantChannel,
+  ConversationHandoff,
+  ConversationHandoffEvent,
   MULTI_TENANT_TABLES,
   ALLOWLIST_TABLES,
   requireTenantScope,

@@ -4,7 +4,10 @@ const {
   HANDOFF_STATUS,
   getHandoffStatus,
   isAiPaused,
+  resolveTenantId,
+  getHandoffState,
 } = require("../src/utils/handoff");
+const { runWithTenantContext } = require("../utils/tenantContext");
 
 test("new customers are AI active by default", () => {
   assert.equal(getHandoffStatus({}), HANDOFF_STATUS.AI_ACTIVE);
@@ -30,4 +33,17 @@ test("legacy human_assigned status remains paused", () => {
 test("resume state enables AI again", () => {
   const user = { metadata: { handoffStatus: HANDOFF_STATUS.AI_ACTIVE } };
   assert.equal(isAiPaused(user), false);
+});
+
+test("tenant context takes precedence over a supplied tenant ID", () => {
+  runWithTenantContext({ tenant_id: "tenant-from-context" }, () => {
+    assert.equal(resolveTenantId("tenant-from-request"), "tenant-from-context");
+  });
+});
+
+test("handoff state fails closed without tenant context", async () => {
+  await assert.rejects(
+    () => getHandoffState({ customer_uid: "customer-1", platform: "messenger" }),
+    /tenant_id is required/
+  );
 });
