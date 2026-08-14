@@ -27,7 +27,8 @@ const { detectComplaint } = require("../../../utils/complaintDetector");
 const { shouldEscalate } = require("../../../utils/escalation");
 const { isDuplicate, markProcessed } = require("../../../utils/dedup");
 const { handleTokenRevocation } = require("../../../utils/tokenManager");
-const { isWithinMessagingWindow, sendViaTagIfExpired } = require("../../../utils/messagingWindow");
+const { isWithinMessagingWindow, sendViaTagIfExpired } = require("../../utils/messagingWindow");
+const { isAiPaused, getHandoffStatus } = require("../../utils/handoff");
 
 function createMessageHandlers({ io, upsertUser, saveMessage }) {
   async function handleMessengerEvent(event, pageId, tenant_id) {
@@ -83,21 +84,28 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       if (shouldEscalate(text)) {
         await User.findOneAndUpdate(
           { uid: senderId },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
+          { $set: { "metadata.handoffStatus": "human_requested", "metadata.handoffRequestedAt": new Date() } },
           { upsert: true }
         );
         io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
       }
+      // Human handoff is checked before settings or AI generation. Once a
+      // customer asks for a person, or staff takes over, AI stays silent.
+      const user = await User.findOne({ uid: senderId });
+      if (isAiPaused(user)) {
+        io.emit("human_handoff_message", {
+          uid: senderId,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(user),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const user = await User.findOne({ uid: senderId });
-      if (user?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
-        return;
-      }
 
       await sendTyping(senderId, pageId);
       let reply;
@@ -148,22 +156,27 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       if (shouldEscalate(text)) {
         await User.findOneAndUpdate(
           { uid: from },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
+          { $set: { "metadata.handoffStatus": "human_requested", "metadata.handoffRequestedAt": new Date() } },
           { upsert: true }
         );
         io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
       }
       await markWhatsAppAsRead(messageId, wabaId).catch(() => {});
+      const waUser = await User.findOne({ uid: from });
+      if (isAiPaused(waUser)) {
+        io.emit("human_handoff_message", {
+          uid: from,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(waUser),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const waUser = await User.findOne({ uid: from });
-      if (waUser?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
-        return;
-      }
 
       // 24-hour window check
       const withinWindow = await isWithinMessagingWindow(from, "whatsapp");
@@ -247,21 +260,26 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       if (shouldEscalate(text)) {
         await User.findOneAndUpdate(
           { uid: senderId },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
+          { $set: { "metadata.handoffStatus": "human_requested", "metadata.handoffRequestedAt": new Date() } },
           { upsert: true }
         );
         io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
       }
+      const igUser = await User.findOne({ uid: senderId });
+      if (isAiPaused(igUser)) {
+        io.emit("human_handoff_message", {
+          uid: senderId,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(igUser),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const igUser = await User.findOne({ uid: senderId });
-      if (igUser?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
-        return;
-      }
 
       await sendInstagramTyping(senderId, pageId);
       let reply;

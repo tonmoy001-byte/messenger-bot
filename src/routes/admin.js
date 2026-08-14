@@ -25,6 +25,7 @@ const {
   suggestKnowledgeAdditions,
   exportFineTuningData,
 } = require("../../utils/conversationAnalyzer");
+const { HANDOFF_STATUS, getHandoffStatus } = require("../utils/handoff");
 
 function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, requireAdmin }) {
   if (!app || typeof app.get !== "function") {
@@ -38,10 +39,54 @@ function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, require
       const users = await User.find().sort({ lastSeen: -1 });
       const convos = await Promise.all(users.map(async (u) => {
         const lastMsg = await Message.findOne({ uid: u.uid }).sort({ createdAt: -1 });
-        return { customerId: u.uid, customerName: u.name, customerPhone: u.phone, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.createdAt : u.lastSeen, unread: false };
+        return { customerId: u.uid, customerName: u.name, customerPhone: u.phone, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.createdAt : u.lastSeen, unread: false, handoffStatus: getHandoffStatus(u), handoffUpdatedAt: u.metadata?.handoffUpdatedAt || null };
       }));
       res.json(convos);
     } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/admin/conversations/:uid/handoff", adminLimiter, authenticateAdmin, async (req, res) => {
+    const { action } = req.body || {};
+    const nextStatus = {
+      takeover: HANDOFF_STATUS.HUMAN_ACTIVE,
+      resume: HANDOFF_STATUS.AI_ACTIVE,
+      request: HANDOFF_STATUS.HUMAN_REQUESTED,
+    }[action];
+
+    if (!nextStatus) {
+      return res.status(400).json({
+        error: "Invalid handoff action. Use takeover, resume, or request.",
+      });
+    }
+
+    try {
+      const user = await User.findOneAndUpdate(
+        { uid: req.params.uid },
+        {
+          $set: {
+            "metadata.handoffStatus": nextStatus,
+            "metadata.handoffUpdatedAt": new Date(),
+          },
+        },
+        { new: true }
+      );
+
+      if (!user) return res.status(404).json({ error: "Conversation not found" });
+
+      io.emit("human_handoff_updated", {
+        uid: req.params.uid,
+        tenant_id: req.tenant_id || null,
+        handoffStatus: nextStatus,
+      });
+
+      return res.json({
+        success: true,
+        uid: req.params.uid,
+        handoffStatus: nextStatus,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   });
 
   app.get("/api/admin/messages/:uid", adminLimiter, authenticateAdmin, async (req, res) => {
@@ -52,12 +97,35 @@ function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, require
   app.post("/api/admin/reply", adminLimiter, authenticateAdmin, async (req, res) => {
     const { uid, message, platform } = req.body;
     try {
+      if (!uid || !message || !String(message).trim()) {
+        return res.status(400).json({ error: "Customer ID and message are required" });
+      }
+
+      const user = await User.findOneAndUpdate(
+        { uid },
+        {
+          $set: {
+            "metadata.handoffStatus": HANDOFF_STATUS.HUMAN_ACTIVE,
+            "metadata.handoffUpdatedAt": new Date(),
+          },
+        },
+        { new: true }
+      );
+      if (!user) return res.status(404).json({ error: "Conversation not found" });
+
       await saveMessage(uid, "model", message);
       if (platform === "messenger") await sendMessage(uid, message);
       else if (platform === "whatsapp") await sendWhatsAppMessage(uid, message);
       else if (platform === "instagram") await sendInstagramMessage(uid, message);
-      io.emit("new_message", { uid, role: "model", content: message, timestamp: new Date() });
-      res.json({ success: true });
+      io.emit("new_message", {
+        uid,
+        role: "model",
+        content: message,
+        timestamp: new Date(),
+        tenant_id: req.tenant_id || null,
+        handoffStatus: HANDOFF_STATUS.HUMAN_ACTIVE,
+      });
+      res.json({ success: true, handoffStatus: HANDOFF_STATUS.HUMAN_ACTIVE });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
