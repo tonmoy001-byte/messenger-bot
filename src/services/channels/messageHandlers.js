@@ -27,7 +27,15 @@ const { detectComplaint } = require("../../../utils/complaintDetector");
 const { shouldEscalate } = require("../../../utils/escalation");
 const { isDuplicate, markProcessed } = require("../../../utils/dedup");
 const { handleTokenRevocation } = require("../../../utils/tokenManager");
-const { isWithinMessagingWindow, sendViaTagIfExpired } = require("../../../utils/messagingWindow");
+const { isWithinMessagingWindow, sendViaTagIfExpired } = require("../../utils/messagingWindow");
+const {
+  isAiPaused,
+  getHandoffStatus,
+  getHandoffState,
+  ensureHandoffState,
+  transitionHandoff,
+  HANDOFF_STATUS,
+} = require("../../utils/handoff");
 
 function createMessageHandlers({ io, upsertUser, saveMessage }) {
   async function handleMessengerEvent(event, pageId, tenant_id) {
@@ -67,7 +75,30 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       const messageContent = text || "[Image]";
       const mediaUrl = event.message?.attachments?.[0]?.type === "image" ? event.message.attachments[0].payload.url : null;
       await saveMessage(senderId, "user", messageContent, mediaUrl);
-      io.emit("new_message", { uid: senderId, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName });
+      const messengerUser = await User.findOne({ uid: senderId });
+      let handoffState = await getHandoffState({
+        tenant_id,
+        customer_uid: senderId,
+        platform: "messenger",
+        legacyUser: messengerUser,
+      });
+      if (handoffState?.legacy) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: senderId,
+          platform: "messenger",
+          status: getHandoffStatus(handoffState),
+          actor_type: "system",
+          reason: "legacy_metadata_migration",
+        });
+      } else {
+        handoffState = await ensureHandoffState({
+          tenant_id,
+          customer_uid: senderId,
+          platform: "messenger",
+        });
+      }
+      io.emit("new_message", { uid: senderId, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName, tenant_id, handoffStatus: getHandoffStatus(handoffState) });
       
       // Ad tracking: Check for referral data from Facebook ads
       const referralData = event.referral || event.message?.referral || null;
@@ -80,24 +111,33 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       if (complaint.isComplaint || complaint.isHandoffRequest) {
         io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
       }
-      if (shouldEscalate(text)) {
-        await User.findOneAndUpdate(
-          { uid: senderId },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
-          { upsert: true }
-        );
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
+      if (shouldEscalate(text) && !isAiPaused(handoffState)) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: senderId,
+          platform: "messenger",
+          status: HANDOFF_STATUS.HUMAN_REQUESTED,
+          actor_type: "customer",
+          reason: "customer_requested_human",
+        });
+        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text, handoffStatus: HANDOFF_STATUS.HUMAN_REQUESTED, tenant_id });
       }
+      // Human handoff is checked before settings or AI generation. Once a
+      // customer asks for a person, or staff takes over, AI stays silent.
+      if (isAiPaused(handoffState)) {
+        io.emit("human_handoff_message", {
+          uid: senderId,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(handoffState),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const user = await User.findOne({ uid: senderId });
-      if (user?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
-        return;
-      }
 
       await sendTyping(senderId, pageId);
       let reply;
@@ -140,30 +180,56 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       console.log(" [WhatsApp] %s (%s): \"%s\"", from, displayName, text || "[Image]");
       await upsertUser(from, "whatsapp", displayName);
       await saveMessage(from, "user", text || "[Image]", null, "whatsapp");
-      io.emit("new_message", { uid: from, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName });
+      const whatsappUser = await User.findOne({ uid: from });
+      let handoffState = await getHandoffState({
+        tenant_id,
+        customer_uid: from,
+        platform: "whatsapp",
+        legacyUser: whatsappUser,
+      });
+      if (handoffState?.legacy) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: from,
+          platform: "whatsapp",
+          status: getHandoffStatus(handoffState),
+          actor_type: "system",
+          reason: "legacy_metadata_migration",
+        });
+      } else {
+        handoffState = await ensureHandoffState({ tenant_id, customer_uid: from, platform: "whatsapp" });
+      }
+      io.emit("new_message", { uid: from, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName, tenant_id, handoffStatus: getHandoffStatus(handoffState) });
       const complaint = text ? detectComplaint(text) : { isComplaint: false, isHandoffRequest: false, sentiment: "neutral" };
       if (complaint.isComplaint || complaint.isHandoffRequest) {
         io.emit("complaint_detected", { uid: from, customerName: displayName, complaint, message: text });
       }
-      if (shouldEscalate(text)) {
-        await User.findOneAndUpdate(
-          { uid: from },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
-          { upsert: true }
-        );
-        io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
+      if (shouldEscalate(text) && !isAiPaused(handoffState)) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: from,
+          platform: "whatsapp",
+          status: HANDOFF_STATUS.HUMAN_REQUESTED,
+          actor_type: "customer",
+          reason: "customer_requested_human",
+        });
+        io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text, handoffStatus: HANDOFF_STATUS.HUMAN_REQUESTED, tenant_id });
       }
       await markWhatsAppAsRead(messageId, wabaId).catch(() => {});
+      if (isAiPaused(handoffState)) {
+        io.emit("human_handoff_message", {
+          uid: from,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(handoffState),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const waUser = await User.findOne({ uid: from });
-      if (waUser?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: from, customerName: displayName, message: text });
-        return;
-      }
 
       // 24-hour window check
       const withinWindow = await isWithinMessagingWindow(from, "whatsapp");
@@ -231,7 +297,26 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       console.log(' [Instagram] %s (%s): "%s"', senderId, displayName, text || "[Image]");
       await upsertUser(senderId, "instagram", displayName, profilePic);
       await saveMessage(senderId, "user", text || "[Image]", null, "instagram");
-      io.emit("new_message", { uid: senderId, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName });
+      const instagramUser = await User.findOne({ uid: senderId });
+      let handoffState = await getHandoffState({
+        tenant_id,
+        customer_uid: senderId,
+        platform: "instagram",
+        legacyUser: instagramUser,
+      });
+      if (handoffState?.legacy) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: senderId,
+          platform: "instagram",
+          status: getHandoffStatus(handoffState),
+          actor_type: "system",
+          reason: "legacy_metadata_migration",
+        });
+      } else {
+        handoffState = await ensureHandoffState({ tenant_id, customer_uid: senderId, platform: "instagram" });
+      }
+      io.emit("new_message", { uid: senderId, role: "user", content: text || "[Image]", timestamp: new Date(), customerName: displayName, tenant_id, handoffStatus: getHandoffStatus(handoffState) });
       
       // Ad tracking: Check for referral data from Instagram ads
       const referralData = event.referral || event.message?.referral || null;
@@ -244,24 +329,31 @@ function createMessageHandlers({ io, upsertUser, saveMessage }) {
       if (complaint.isComplaint || complaint.isHandoffRequest) {
         io.emit("complaint_detected", { uid: senderId, customerName: displayName, complaint, message: text });
       }
-      if (shouldEscalate(text)) {
-        await User.findOneAndUpdate(
-          { uid: senderId },
-          { $set: { "metadata.handoffStatus": "human_assigned" } },
-          { upsert: true }
-        );
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
+      if (shouldEscalate(text) && !isAiPaused(handoffState)) {
+        handoffState = await transitionHandoff({
+          tenant_id,
+          customer_uid: senderId,
+          platform: "instagram",
+          status: HANDOFF_STATUS.HUMAN_REQUESTED,
+          actor_type: "customer",
+          reason: "customer_requested_human",
+        });
+        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text, handoffStatus: HANDOFF_STATUS.HUMAN_REQUESTED, tenant_id });
       }
+      if (isAiPaused(handoffState)) {
+        io.emit("human_handoff_message", {
+          uid: senderId,
+          customerName: displayName,
+          message: text,
+          handoffStatus: getHandoffStatus(handoffState),
+          tenant_id,
+        });
+        return;
+      }
+
       let settings = await Settings.findOne({ configId: "global" });
       if (!settings) settings = { autoReply: true };
       if (!settings.autoReply) return;
-
-      // Check if conversation is assigned to human
-      const igUser = await User.findOne({ uid: senderId });
-      if (igUser?.metadata?.handoffStatus === "human_assigned") {
-        io.emit("human_handoff_message", { uid: senderId, customerName: displayName, message: text });
-        return;
-      }
 
       await sendInstagramTyping(senderId, pageId);
       let reply;

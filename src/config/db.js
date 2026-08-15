@@ -30,6 +30,8 @@ const {
   AdClick,
   Tenant,
   TenantChannel,
+  ConversationHandoff,
+  ConversationHandoffEvent,
 } = require("./supabaseClient");
 
 /**
@@ -69,4 +71,6 @@ module.exports = {
   AdClick,
   Tenant,
   TenantChannel,
+  ConversationHandoff,
+  ConversationHandoffEvent,
 };

@@ -12,6 +12,7 @@ const {
   Admin,
   Settings,
   Feedback,
+  ConversationHandoff,
 } = require("../config/db");
 const { saveMessage } = require("../utils/messageHelpers");
 const { sendMessage } = require("../services/channels/messenger");
@@ -25,6 +26,11 @@ const {
   suggestKnowledgeAdditions,
   exportFineTuningData,
 } = require("../../utils/conversationAnalyzer");
+const {
+  HANDOFF_STATUS,
+  getHandoffStatus,
+  transitionHandoff,
+} = require("../utils/handoff");
 
 function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, requireAdmin }) {
   if (!app || typeof app.get !== "function") {
@@ -36,12 +42,61 @@ function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, require
   app.get("/api/admin/conversations", adminLimiter, authenticateAdmin, async (req, res) => {
     try {
       const users = await User.find().sort({ lastSeen: -1 });
+      const handoffs = await ConversationHandoff.find();
+      const handoffMap = new Map(handoffs.map((h) => [`${h.customer_uid}:${h.platform}`, h]));
       const convos = await Promise.all(users.map(async (u) => {
         const lastMsg = await Message.findOne({ uid: u.uid }).sort({ createdAt: -1 });
-        return { customerId: u.uid, customerName: u.name, customerPhone: u.phone, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.createdAt : u.lastSeen, unread: false };
+        const handoff = handoffMap.get(`${u.uid}:${u.platform}`);
+        return { customerId: u.uid, customerName: u.name, customerPhone: u.phone, profilePic: u.profilePic, platform: u.platform, lastMessage: lastMsg ? lastMsg.content : "No messages yet", lastMessageTime: lastMsg ? lastMsg.createdAt : u.lastSeen, unread: false, handoffStatus: getHandoffStatus(handoff || u), handoffUpdatedAt: handoff?.updated_at || u.metadata?.handoffUpdatedAt || null, handoffAssignedAdminId: handoff?.assigned_admin_id || null };
       }));
       res.json(convos);
     } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/admin/conversations/:uid/handoff", adminLimiter, authenticateAdmin, async (req, res) => {
+    const { action, platform } = req.body || {};
+    const nextStatus = {
+      takeover: HANDOFF_STATUS.HUMAN_ACTIVE,
+      resume: HANDOFF_STATUS.AI_ACTIVE,
+      request: HANDOFF_STATUS.HUMAN_REQUESTED,
+    }[action];
+
+    if (!nextStatus) {
+      return res.status(400).json({
+        error: "Invalid handoff action. Use takeover, resume, or request.",
+      });
+    }
+
+    try {
+      const user = await User.findOne({ uid: req.params.uid });
+      if (!user) return res.status(404).json({ error: "Conversation not found" });
+      const conversationPlatform = platform || user.platform || "messenger";
+      const handoff = await transitionHandoff({
+        tenant_id: req.tenant_id,
+        customer_uid: req.params.uid,
+        platform: conversationPlatform,
+        status: nextStatus,
+        actor_type: "admin",
+        actor_admin_id: req.user?.id || null,
+        reason: action === "takeover" ? "staff_takeover" : action === "resume" ? "staff_resumed_ai" : "staff_requested_handoff",
+      });
+
+      io.emit("human_handoff_updated", {
+        uid: req.params.uid,
+        platform: conversationPlatform,
+        tenant_id: req.tenant_id || null,
+        handoffStatus: nextStatus,
+      });
+
+      return res.json({
+        success: true,
+        uid: req.params.uid,
+        platform: conversationPlatform,
+        handoffStatus: getHandoffStatus(handoff),
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
   });
 
   app.get("/api/admin/messages/:uid", adminLimiter, authenticateAdmin, async (req, res) => {
@@ -52,12 +107,37 @@ function registerAdminRoutes(app, { io, adminLimiter, authenticateAdmin, require
   app.post("/api/admin/reply", adminLimiter, authenticateAdmin, async (req, res) => {
     const { uid, message, platform } = req.body;
     try {
-      await saveMessage(uid, "model", message);
-      if (platform === "messenger") await sendMessage(uid, message);
-      else if (platform === "whatsapp") await sendWhatsAppMessage(uid, message);
-      else if (platform === "instagram") await sendInstagramMessage(uid, message);
-      io.emit("new_message", { uid, role: "model", content: message, timestamp: new Date() });
-      res.json({ success: true });
+      if (!uid || !message || !String(message).trim()) {
+        return res.status(400).json({ error: "Customer ID and message are required" });
+      }
+
+      const user = await User.findOne({ uid });
+      if (!user) return res.status(404).json({ error: "Conversation not found" });
+      const conversationPlatform = platform || user.platform || "messenger";
+      const handoff = await transitionHandoff({
+        tenant_id: req.tenant_id,
+        customer_uid: uid,
+        platform: conversationPlatform,
+        status: HANDOFF_STATUS.HUMAN_ACTIVE,
+        actor_type: "admin",
+        actor_admin_id: req.user?.id || null,
+        reason: "staff_manual_reply",
+      });
+
+      await saveMessage(uid, "model", message, null, conversationPlatform);
+      if (conversationPlatform === "messenger") await sendMessage(uid, message);
+      else if (conversationPlatform === "whatsapp") await sendWhatsAppMessage(uid, message);
+      else if (conversationPlatform === "instagram") await sendInstagramMessage(uid, message);
+      io.emit("new_message", {
+        uid,
+        role: "model",
+        content: message,
+        timestamp: new Date(),
+        platform: conversationPlatform,
+        tenant_id: req.tenant_id || null,
+        handoffStatus: getHandoffStatus(handoff),
+      });
+      res.json({ success: true, platform: conversationPlatform, handoffStatus: getHandoffStatus(handoff) });
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 

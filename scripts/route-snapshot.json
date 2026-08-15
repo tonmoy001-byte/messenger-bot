@@ -43,6 +43,7 @@
   "GET /webhook/whatsapp",
   "PATCH /api/admin/ads/:adId/status",
   "POST /api/admin/ads",
+  "POST /api/admin/conversations/:uid/handoff",
   "POST /api/admin/data-retention/purge",
   "POST /api/admin/feedback",
   "POST /api/admin/integrations/shopify",
